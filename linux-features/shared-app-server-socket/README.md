@@ -1,30 +1,31 @@
 # Shared App-Server Socket
 
-This opt-in feature makes the Codex app-server used by Desktop available on a
+This optional feature connects Desktop to a Codex app-server through a
 user-private Unix socket. It does not implement, inspect, filter, or translate
-the app-server protocol.
+the app-server protocol. The feature is disabled by default and is activated
+only when `shared-app-server-socket` is listed in the ignored
+`linux-features/features.json` file.
 
 From an SSH client's point of view, this behaves like an ordinary Codex SSH
 app-server connection. The remote `codex app-server proxy` command still
 provides the same stdio/WebSocket byte stream and the same app-server methods,
-notifications, approvals, and thread authority. The only difference is that the
-proxy attaches to Desktop's existing authority instead of starting a separate
-app-server with a separate thread namespace.
+notifications, approvals, and thread authority.
 
-Desktop owns one selected Codex CLI child running `app-server --listen
-unix://PATH`. Desktop connects through the CLI's stock `app-server proxy --sock
-PATH` byte tunnel and its existing WebSocket transport. Other local clients use
-the same stock proxy command to attach to the Unix socket and receive the normal
-WebSocket `/rpc` byte stream. Closing Desktop stops the authority.
+## Authority modes
 
-The default socket is scoped by Linux app id under `XDG_RUNTIME_DIR`, preventing
-side-by-side Desktop instances from sharing an authority accidentally. Override
-it with `CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET` when a stable path is required.
-The Codex app-server creates the socket with user-only permissions. A shell
-wrapper may route bare `codex app-server proxy` SSH sessions to this path.
-Keep the socket in a directory accessible only to the owning user. It is a local
-control endpoint and must not be exposed directly over TCP or forwarded as a
-network service.
+### Desktop-owned mode
+
+Desktop-owned mode is the default behavior after the feature is enabled.
+Desktop starts one selected Codex CLI child running `app-server --listen
+unix://PATH`, owns the adjacent bridge lock and socket lifecycle, and connects
+through the stock `app-server proxy --sock PATH` byte tunnel. Other local
+clients can attach through that same proxy command and receive the normal
+WebSocket `/rpc` byte stream. Closing Desktop stops its authority and releases
+the socket and lock it owns.
+
+The default socket is scoped by Linux app id under `XDG_RUNTIME_DIR`, which
+prevents side-by-side Desktop instances from sharing an authority accidentally.
+Set `CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET` to use a stable path.
 
 Authority startup is serialized by an owner-only lock next to the socket. The
 lock records the owning Linux process identity, so a later Desktop launch can
@@ -36,9 +37,46 @@ Legacy locks without owner metadata remain protected for 15 seconds, longer
 than the authority startup timeout, before they can be reclaimed when no socket
 exists.
 
+### Attach-only mode
+
+Attach-only mode connects Desktop to an app-server authority that is already
+running and owned by another local supervisor:
+
+```bash
+export CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY=1
+export CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET="/absolute/canonical/path/app-server.sock"
+codex-desktop
+```
+
+The opt-in value is exactly `1`; values such as `true` do not select
+attach-only mode. Attach-only mode is valid only for Desktop's local host. The
+configured socket path must be absolute, its parent path must already be
+canonical and contain no symlink, and the current Linux UID must be available.
+The parent must be a real directory owned by that UID with no group or other
+write bits. The endpoint must be a real Unix socket owned by the same UID, must
+grant owner read and write, and must grant no group or other permissions. Owner
+execute is irrelevant and is not rejected.
+
+Desktop spawns only `codex app-server proxy --sock PATH` for its own connection
+in attach-only mode. It never starts, stops, restarts, reclaims, unlinks,
+replaces, or uninstalls the external authority, its socket, or a bridge lock.
+Disconnecting or closing Desktop stops only Desktop's proxy child. The external
+supervisor remains solely responsible for authority startup, recovery, and
+shutdown.
+
+Attach-only validation fails closed. An unsafe or unavailable endpoint aborts
+the connection before a proxy is spawned, and Desktop does not fall back to
+Desktop-owned mode or to another transport. If the external authority later
+exits, Desktop does not restart it.
+
+In both modes, keep the socket within the owning user's trust boundary. It is a
+local control endpoint and must not be exposed directly over TCP or forwarded
+as a network service.
+
 ## SSH setup
 
-Use a stable socket path when the Desktop instance will be reached over SSH:
+For Desktop-owned mode, use a stable socket path when the Desktop instance will
+be reached over SSH:
 
 ```bash
 export CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET="$HOME/.codex/app-server-control/app-server-control.sock"
@@ -98,8 +136,8 @@ Enable the feature in the ignored `linux-features/features.json` file:
 }
 ```
 
-Then rebuild and launch the app. The feature is disabled by default and does
-not run independently of Desktop.
+Then rebuild and launch the app. Enabling the feature without the exact
+attach-only opt-in selects Desktop-owned mode.
 
 Run focused tests with:
 
