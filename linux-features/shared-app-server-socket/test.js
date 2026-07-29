@@ -17,6 +17,13 @@ const {
   stageEnabledLinuxFeatureInstall,
 } = require("../../scripts/lib/linux-features.js");
 const {
+  createPatchReport,
+  criticalFailuresFromReport,
+} = require("../../scripts/lib/patch-report.js");
+const {
+  applyMainBundlePatchDescriptors,
+} = require("../../scripts/patches/engine.js");
+const {
   attachmentTransportClassSource,
   applySharedAppServerSocketPatch,
   descriptors,
@@ -292,6 +299,32 @@ function pathIdentity(candidate) {
   }
 }
 
+function trackedAttachmentFs({ afterFstat = null } = {}) {
+  const opened = [];
+  const openFds = new Set();
+  const closed = [];
+  const fsImpl = {
+    ...fs,
+    openSync(candidate, flags, ...args) {
+      const fd = fs.openSync(candidate, flags, ...args);
+      opened.push({ candidate, fd, flags });
+      openFds.add(fd);
+      return fd;
+    },
+    fstatSync(fd, ...args) {
+      const stat = fs.fstatSync(fd, ...args);
+      afterFstat?.(fd, stat);
+      return stat;
+    },
+    closeSync(fd) {
+      const result = fs.closeSync(fd);
+      if (openFds.delete(fd)) closed.push(fd);
+      return result;
+    },
+  };
+  return { closed, fsImpl, opened, openFds };
+}
+
 async function assertAttachmentValidationRejects({
   expectedError,
   fsImpl = fs,
@@ -505,6 +538,108 @@ test("patch rejects every inconsistent or misordered state before attachment mod
   }
 });
 
+test("production patch engine records feature drift and partial states as required failures", async (t) => {
+  const cases = {
+    "unsupported bundle drift": "unrelated bundle",
+    "inconsistent partial patch state": partialPatchStates()["marker only"],
+  };
+
+  for (const [name, source] of Object.entries(cases)) {
+    await t.test(name, () => {
+      const report = createPatchReport();
+      const { patchedSource } = applyMainBundlePatchDescriptors(
+        source,
+        descriptors,
+        {},
+        report,
+      );
+      const entry = report.patches.find(
+        (patch) => patch.name === "main-process-shared-app-server-socket",
+      );
+
+      assert.equal(patchedSource, source);
+      assert.equal(entry?.status, "failed-required");
+      assert.equal(entry?.ciPolicy, "required-upstream");
+      assert.ok(
+        criticalFailuresFromReport(report).some(
+          (failure) => failure.name === "main-process-shared-app-server-socket",
+        ),
+      );
+    });
+  }
+});
+
+test("candidate patch gate aborts on feature drift and partial patch states", async (t) => {
+  const cases = {
+    "unsupported bundle drift": "unrelated bundle",
+    "inconsistent partial patch state": partialPatchStates()["marker only"],
+  };
+
+  for (const [name, source] of Object.entries(cases)) {
+    await t.test(name, () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shared-socket-required-gate-"));
+      const featuresRoot = path.join(tempRoot, "linux-features");
+      const featureDir = path.join(featuresRoot, "shared-app-server-socket");
+      const extractedDir = path.join(tempRoot, "app-extracted");
+      const buildDir = path.join(extractedDir, ".vite", "build");
+      const reportPath = path.join(tempRoot, "patch-report.json");
+      fs.mkdirSync(featureDir, { recursive: true });
+      fs.mkdirSync(buildDir, { recursive: true });
+      fs.copyFileSync(path.join(__dirname, "feature.json"), path.join(featureDir, "feature.json"));
+      fs.copyFileSync(path.join(__dirname, "patch.js"), path.join(featureDir, "patch.js"));
+      fs.copyFileSync(path.join(__dirname, "README.md"), path.join(featureDir, "README.md"));
+      fs.writeFileSync(
+        path.join(featuresRoot, "features.json"),
+        `${JSON.stringify({ enabled: ["shared-app-server-socket"] })}\n`,
+      );
+      fs.writeFileSync(path.join(buildDir, "main.js"), source);
+      fs.writeFileSync(path.join(extractedDir, "package.json"), "{}\n");
+
+      try {
+        const result = spawnSync(
+          process.execPath,
+          [
+            path.join(__dirname, "..", "..", "scripts", "patch-linux-window-ui.js"),
+            "--enforce-critical",
+            "--report-json",
+            reportPath,
+            extractedDir,
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              CODEX_LINUX_FEATURES_CONFIG: path.join(featuresRoot, "features.json"),
+              CODEX_LINUX_FEATURES_ROOT: featuresRoot,
+            },
+          },
+        );
+        assert.equal(
+          fs.existsSync(reportPath),
+          true,
+          `candidate patch gate must write its report before exiting\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+        );
+        const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+        const featureEntry = report.patches.find(
+          (patch) =>
+            patch.name ===
+            "feature:shared-app-server-socket:main-process-shared-app-server-socket",
+        );
+
+        assert.equal(result.status, 1);
+        assert.equal(featureEntry?.status, "failed-required");
+        assert.equal(featureEntry?.ciPolicy, "required-upstream");
+        assert.match(
+          result.stderr,
+          /feature:shared-app-server-socket:main-process-shared-app-server-socket \(failed-required\)/,
+        );
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("patch selects attachment-only transport only for explicit local mode and fails closed", () => {
   const patched = applySharedAppServerSocketPatch(syntheticBundle());
   assert.match(patched, /CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY===`1`/);
@@ -585,6 +720,262 @@ test("attachment-only transport source excludes authority lifecycle primitives",
   }
 });
 
+test("attachment-only transport inode-binds the validated parent across a path swap", async () => {
+  const tempDir = makeUnixSocketTempDir();
+  const parentDir = path.join(tempDir, "authority");
+  const heldParentDir = path.join(tempDir, "authority-held");
+  const replacementDir = path.join(tempDir, "replacement");
+  const socketPath = path.join(parentDir, "app-server.sock");
+  const replacementSocketPath = path.join(replacementDir, "app-server.sock");
+  fs.mkdirSync(parentDir, { mode: 0o700 });
+  fs.mkdirSync(replacementDir, { mode: 0o700 });
+  const originalServer = await listenUnix(socketPath);
+  const replacementServer = await listenUnix(replacementSocketPath);
+  fs.chmodSync(socketPath, 0o600);
+  fs.chmodSync(replacementSocketPath, 0o600);
+  const originalIdentity = pathIdentity(socketPath);
+  const replacementIdentity = pathIdentity(replacementSocketPath);
+  let swapped = false;
+  const tracking = trackedAttachmentFs({
+    afterFstat() {
+      if (swapped) return;
+      fs.renameSync(parentDir, heldParentDir);
+      fs.renameSync(replacementDir, parentDir);
+      swapped = true;
+    },
+  });
+  const proxy = fakeChild();
+  let spawnedSocketPath = null;
+  let spawnedSocketIdentity = null;
+  const { Transport } = loadInjectedAttachmentTransport({
+    fsImpl: tracking.fsImpl,
+    spawnImpl(_command, args) {
+      spawnedSocketPath = args.at(-1);
+      spawnedSocketIdentity = pathIdentity(spawnedSocketPath);
+      return proxy;
+    },
+  });
+  const originalCli = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = "/fake/codex";
+
+  try {
+    const transport = new Transport(socketPath);
+    await transport.connect();
+    assert.equal(swapped, true, "test must replace the configured parent after its fd is bound");
+    assert.match(
+      spawnedSocketPath,
+      new RegExp(`^/proc/${process.pid}/fd/\\d+/app-server\\.sock$`),
+    );
+    assert.deepEqual(spawnedSocketIdentity, originalIdentity);
+    assert.deepEqual(pathIdentity(socketPath), replacementIdentity);
+    assert.equal(tracking.openFds.size, 0, "validation fd must close after WebSocket open");
+    assert.equal(fs.existsSync(`${socketPath}.lock`), false);
+    const proxyClosed = once(proxy, "close");
+    transport.dispose();
+    await proxyClosed;
+  } finally {
+    if (originalCli == null) delete process.env.CODEX_CLI_PATH;
+    else process.env.CODEX_CLI_PATH = originalCli;
+    await Promise.all([closeServer(originalServer), closeServer(replacementServer)]);
+    for (const fd of tracking.openFds) fs.closeSync(fd);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("attachment-only transport closes each validation fd on every connect exit", async (t) => {
+  const tempDir = makeUnixSocketTempDir();
+  const socketPath = path.join(tempDir, "app-server.sock");
+  const server = await listenUnix(socketPath);
+  fs.chmodSync(socketPath, 0o600);
+  const originalCli = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = "/fake/codex";
+
+  async function runCase(name, {
+    expectedError = null,
+    spawnImpl = () => fakeChild(),
+    timeoutCapMs = null,
+    WebSocketImpl = null,
+  }) {
+    await t.test(name, async () => {
+      const tracking = trackedAttachmentFs();
+      const { Transport } = loadInjectedAttachmentTransport({
+        fsImpl: tracking.fsImpl,
+        spawnImpl,
+        timeoutCapMs,
+        WebSocketImpl,
+      });
+      const transport = new Transport(socketPath);
+      try {
+        if (expectedError == null) await transport.connect();
+        else await assert.rejects(transport.connect(), expectedError);
+        assert.equal(tracking.opened.length, 1);
+        assert.equal(
+          tracking.opened[0].flags & 3,
+          fs.constants.O_RDONLY,
+          "parent fd must be opened read-only",
+        );
+        assert.notEqual(tracking.opened[0].flags & fs.constants.O_DIRECTORY, 0);
+        assert.notEqual(tracking.opened[0].flags & fs.constants.O_NOFOLLOW, 0);
+        assert.equal(tracking.openFds.size, 0);
+        assert.deepEqual(tracking.closed, [tracking.opened[0].fd]);
+      } finally {
+        transport.dispose();
+        for (const fd of tracking.openFds) fs.closeSync(fd);
+      }
+    });
+  }
+
+  class ConstructorFailureWebSocket {
+    constructor(_url, options) {
+      options.createConnection();
+      throw new Error("constructor failure");
+    }
+  }
+  class ErrorWebSocket extends EventEmitter {
+    constructor(_url, options) {
+      super();
+      this.stream = options.createConnection();
+      queueMicrotask(() => this.emit("error", new Error("pre-open error")));
+    }
+
+    terminate() {
+      this.stream.destroy();
+    }
+  }
+  class CloseWebSocket extends EventEmitter {
+    constructor(_url, options) {
+      super();
+      this.stream = options.createConnection();
+      queueMicrotask(() => this.emit("close"));
+    }
+
+    terminate() {
+      this.stream.destroy();
+    }
+  }
+  class TimeoutWebSocket extends EventEmitter {
+    constructor(_url, options) {
+      super();
+      this.stream = options.createConnection();
+    }
+
+    terminate() {
+      this.stream.destroy();
+    }
+  }
+
+  try {
+    await runCase("successful WebSocket open", {});
+    await runCase("synchronous proxy spawn failure", {
+      expectedError: /spawn failure/,
+      spawnImpl() {
+        throw new Error("spawn failure");
+      },
+    });
+    await runCase("WebSocket constructor failure", {
+      expectedError: /constructor failure/,
+      WebSocketImpl: ConstructorFailureWebSocket,
+    });
+    await runCase("pre-open WebSocket error", {
+      expectedError: /pre-open error/,
+      WebSocketImpl: ErrorWebSocket,
+    });
+    await runCase("pre-open WebSocket close", {
+      expectedError: /closed before opening/,
+      WebSocketImpl: CloseWebSocket,
+    });
+    await runCase("WebSocket open timeout", {
+      expectedError: /open timed out/,
+      timeoutCapMs: 5,
+      WebSocketImpl: TimeoutWebSocket,
+    });
+
+    await t.test("dispose while WebSocket open is pending", async () => {
+      const tracking = trackedAttachmentFs();
+      let webSocket;
+      class PendingWebSocket extends EventEmitter {
+        constructor(_url, options) {
+          super();
+          webSocket = this;
+          this.stream = options.createConnection();
+        }
+
+        terminate() {
+          this.stream.destroy();
+        }
+      }
+      const { Transport } = loadInjectedAttachmentTransport({
+        fsImpl: tracking.fsImpl,
+        spawnImpl: () => fakeChild(),
+        WebSocketImpl: PendingWebSocket,
+      });
+      const transport = new Transport(socketPath);
+      const pending = transport.connect();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(tracking.openFds.size, 1);
+      transport.dispose();
+      assert.equal(tracking.openFds.size, 0);
+      webSocket.emit("close");
+      await assert.rejects(pending, /closed before opening/);
+      assert.deepEqual(tracking.closed, [tracking.opened[0].fd]);
+    });
+  } finally {
+    if (originalCli == null) delete process.env.CODEX_CLI_PATH;
+    else process.env.CODEX_CLI_PATH = originalCli;
+    await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("concurrent attachment connects own independent validation fds", async () => {
+  const tempDir = makeUnixSocketTempDir();
+  const socketPath = path.join(tempDir, "app-server.sock");
+  const server = await listenUnix(socketPath);
+  fs.chmodSync(socketPath, 0o600);
+  const tracking = trackedAttachmentFs();
+  const webSockets = [];
+  class PendingWebSocket extends EventEmitter {
+    constructor(_url, options) {
+      super();
+      this.stream = options.createConnection();
+      webSockets.push(this);
+    }
+
+    terminate() {
+      this.stream.destroy();
+    }
+  }
+  const { Transport } = loadInjectedAttachmentTransport({
+    fsImpl: tracking.fsImpl,
+    spawnImpl: () => fakeChild(),
+    WebSocketImpl: PendingWebSocket,
+  });
+  const transport = new Transport(socketPath);
+  const originalCli = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = "/fake/codex";
+
+  try {
+    const first = transport.connect();
+    const second = transport.connect();
+    assert.equal(tracking.openFds.size, 2);
+    assert.notEqual(tracking.opened[0].fd, tracking.opened[1].fd);
+    webSockets[0].emit("open");
+    await first;
+    assert.equal(tracking.openFds.size, 1);
+    webSockets[1].emit("open");
+    await second;
+    assert.equal(tracking.openFds.size, 0);
+    assert.equal(new Set(tracking.closed).size, 2);
+    transport.dispose();
+  } finally {
+    if (originalCli == null) delete process.env.CODEX_CLI_PATH;
+    else process.env.CODEX_CLI_PATH = originalCli;
+    for (const fd of tracking.openFds) fs.closeSync(fd);
+    await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("attachment-only transport disposes its proxy without changing the external socket", async () => {
   assert.equal(
     typeof attachmentTransportClassSource,
@@ -609,9 +1000,12 @@ test("attachment-only transport disposes its proxy without changing the external
   try {
     const transport = new Transport(socketPath);
     await transport.connect();
-    assert.deepEqual(
-      spawnCalls,
-      [{ command: "/fake/codex", args: ["app-server", "proxy", "--sock", socketPath] }],
+    assert.equal(spawnCalls.length, 1);
+    assert.equal(spawnCalls[0].command, "/fake/codex");
+    assert.deepEqual(spawnCalls[0].args.slice(0, -1), ["app-server", "proxy", "--sock"]);
+    assert.match(
+      spawnCalls[0].args.at(-1),
+      new RegExp(`^/proc/${process.pid}/fd/\\d+/app-server\\.sock$`),
     );
 
     const proxyClosed = once(proxy, "close");
@@ -662,13 +1056,15 @@ test("attachment-only transport reconnects to the same socket after disposal", a
       await proxyClosed;
     }
 
-    assert.deepEqual(
-      spawnCalls,
-      [
-        { command: "/fake/codex", args: ["app-server", "proxy", "--sock", socketPath] },
-        { command: "/fake/codex", args: ["app-server", "proxy", "--sock", socketPath] },
-      ],
-    );
+    assert.equal(spawnCalls.length, 2);
+    for (const spawnCall of spawnCalls) {
+      assert.equal(spawnCall.command, "/fake/codex");
+      assert.deepEqual(spawnCall.args.slice(0, -1), ["app-server", "proxy", "--sock"]);
+      assert.match(
+        spawnCall.args.at(-1),
+        new RegExp(`^/proc/${process.pid}/fd/\\d+/app-server\\.sock$`),
+      );
+    }
     const after = fs.lstatSync(socketPath);
     assert.equal(`${after.dev}:${after.ino}`, `${before.dev}:${before.ino}`);
     assert.equal(fs.existsSync(`${socketPath}.lock`), false);
@@ -967,7 +1363,11 @@ test("attachment-only transport rejects every untrusted endpoint without mutatio
         ...fs,
         lstatSync(candidate, ...args) {
           const stat = fs.lstatSync(candidate, ...args);
-          if (candidate !== wrongOwnerPath) return stat;
+          const isInspectedSocket =
+            inspectedPath === "socket" &&
+            (candidate === wrongOwnerPath ||
+              /^\/proc\/self\/fd\/\d+\/app-server\.sock$/.test(candidate));
+          if (candidate !== wrongOwnerPath && !isInspectedSocket) return stat;
           return new Proxy(stat, {
             get(target, property, receiver) {
               if (property === "uid") return target.uid + 1;
@@ -992,6 +1392,52 @@ test("attachment-only transport rejects every untrusted endpoint without mutatio
     });
   }
 
+  for (const [name, property, value, expectedError] of [
+    ["opened parent inode changed", "ino", (stat) => stat.ino + 1, /parent changed during validation/],
+    ["opened parent owner changed", "uid", (stat) => stat.uid + 1, /parent has unexpected owner/],
+    [
+      "opened parent owner access changed",
+      "mode",
+      (stat) => (stat.mode & ~0o777) | 0o300,
+      /parent owner read and execute permissions are required/,
+    ],
+    [
+      "opened parent became group-writable",
+      "mode",
+      (stat) => stat.mode | 0o020,
+      /parent has unsafe permissions/,
+    ],
+  ]) {
+    await t.test(name, async () => {
+      const tempDir = makeUnixSocketTempDir();
+      const socketPath = path.join(tempDir, "app-server.sock");
+      const server = await listenUnix(socketPath);
+      fs.chmodSync(socketPath, 0o600);
+      const fstatFs = {
+        ...fs,
+        fstatSync(fd, ...args) {
+          const stat = fs.fstatSync(fd, ...args);
+          return new Proxy(stat, {
+            get(target, candidate, receiver) {
+              if (candidate === property) return value(target);
+              return Reflect.get(target, candidate, receiver);
+            },
+          });
+        },
+      };
+      try {
+        await assertAttachmentValidationRejects({
+          expectedError,
+          fsImpl: fstatFs,
+          socketPath,
+        });
+      } finally {
+        await closeServer(server);
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+  }
+
   for (const [name, mode] of [
     ["group-writable parent", 0o720],
     ["other-writable parent", 0o702],
@@ -1005,6 +1451,41 @@ test("attachment-only transport rejects every untrusted endpoint without mutatio
       try {
         await assertAttachmentValidationRejects({
           expectedError: /parent has unsafe permissions/,
+          socketPath,
+        });
+      } finally {
+        await closeServer(server);
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  for (const [name, mode] of [
+    ["parent owner read bit missing", 0o300],
+    ["parent owner execute bit missing", 0o400],
+  ]) {
+    await t.test(name, async () => {
+      const tempDir = makeUnixSocketTempDir();
+      const socketPath = path.join(tempDir, "app-server.sock");
+      const server = await listenUnix(socketPath);
+      fs.chmodSync(socketPath, 0o600);
+      const modeFs = {
+        ...fs,
+        lstatSync(candidate, ...args) {
+          const stat = fs.lstatSync(candidate, ...args);
+          if (candidate !== tempDir) return stat;
+          return new Proxy(stat, {
+            get(target, property, receiver) {
+              if (property === "mode") return (target.mode & ~0o777) | mode;
+              return Reflect.get(target, property, receiver);
+            },
+          });
+        },
+      };
+      try {
+        await assertAttachmentValidationRejects({
+          expectedError: /parent owner read and execute permissions are required/,
+          fsImpl: modeFs,
           socketPath,
         });
       } finally {
@@ -1149,10 +1630,10 @@ test("patch rejects the previous SSH transport class shape", () => {
   assert.match(warnings.join("\n"), /SSH WebSocket transport/);
 });
 
-test("descriptor is optional and targets the main bundle", () => {
+test("descriptor is required-upstream and targets the main bundle", () => {
   assert.deepEqual(
     descriptors.map(({ id, phase, ciPolicy }) => [id, phase, ciPolicy]),
-    [["main-process-shared-app-server-socket", "main-bundle", "optional"]],
+    [["main-process-shared-app-server-socket", "main-bundle", "required-upstream"]],
   );
 });
 
@@ -1698,7 +2179,7 @@ test("socket environment hook shell syntax is valid", () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("documented wrapper attaches to a real Codex authority through the stock proxy", { timeout: 15000 }, async (t) => {
+test("real Codex proxy attaches through the Desktop parent-PID proc fd path", { timeout: 15000 }, async (t) => {
   const codexCli = process.env.CODEX_CLI_PATH;
   if (codexCli == null) {
     t.skip("set CODEX_CLI_PATH to run the real Codex app-server integration test");
@@ -1708,11 +2189,17 @@ test("documented wrapper attaches to a real Codex authority through the stock pr
   const tempDir = makeUnixSocketTempDir();
   const codexHome = path.join(tempDir, "codex-home");
   const socketPath = path.join(tempDir, "authority", "app-server.sock");
+  const parentDir = path.dirname(socketPath);
   const binDir = path.join(tempDir, "bin");
   const wrapperPath = path.join(binDir, "codex");
   fs.mkdirSync(codexHome, { mode: 0o700 });
-  fs.mkdirSync(path.dirname(socketPath), { mode: 0o700 });
+  fs.mkdirSync(parentDir, { mode: 0o700 });
   fs.mkdirSync(binDir, { mode: 0o700 });
+  const parentFd = fs.openSync(
+    parentDir,
+    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
+  );
+  const procSocketPath = `/proc/${process.pid}/fd/${parentFd}/${path.basename(socketPath)}`;
   fs.writeFileSync(
     wrapperPath,
     [
@@ -1729,7 +2216,7 @@ test("documented wrapper attaches to a real Codex authority through the stock pr
   const env = {
     ...process.env,
     CODEX_HOME: codexHome,
-    DESKTOP_SOCKET: socketPath,
+    DESKTOP_SOCKET: procSocketPath,
     PATH: `${binDir}:${process.env.PATH}`,
     REAL_CODEX: codexCli,
   };
@@ -1748,6 +2235,7 @@ test("documented wrapper attaches to a real Codex authority through the stock pr
       0,
       "app-server socket must not grant group/other access",
     );
+    assert.deepEqual(pathIdentity(procSocketPath), pathIdentity(socketPath));
 
     proxy = spawn("bash", ["-c", "codex app-server proxy"], {
       env,
@@ -1771,6 +2259,7 @@ test("documented wrapper attaches to a real Codex authority through the stock pr
     assert.match(response.toLowerCase(), /upgrade: websocket/);
   } finally {
     await Promise.all([stopChild(proxy), stopChild(authority)]);
+    fs.closeSync(parentFd);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

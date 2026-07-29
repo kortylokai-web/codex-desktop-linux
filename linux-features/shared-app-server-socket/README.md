@@ -52,26 +52,39 @@ The opt-in value is exactly `1`; values such as `true` do not select
 attach-only mode. Attach-only mode is valid only for Desktop's local host. The
 configured socket path must be absolute, its parent path must already be
 canonical and contain no symlink, and the current Linux UID must be available.
-The parent must be a real directory owned by that UID with no group or other
-write bits. The endpoint must be a real Unix socket owned by the same UID, must
+The parent must be a real directory owned by that UID, grant the owner read and
+execute permissions (`0500` minimum), and grant no group or other write
+permission. The endpoint must be a real Unix socket owned by the same UID, must
 grant owner read and write, and must grant no group or other permissions. Owner
-execute is irrelevant and is not rejected.
+execute on the socket is irrelevant and is not rejected.
 
-Desktop spawns only `codex app-server proxy --sock PATH` for its own connection
-in attach-only mode. It never starts, stops, restarts, reclaims, unlinks,
-replaces, or uninstalls the external authority, its socket, or a bridge lock.
-Disconnecting or closing Desktop stops only Desktop's proxy child. The external
-supervisor remains solely responsible for authority startup, recovery, and
-shutdown.
+Desktop opens the canonical parent with Linux `O_NOFOLLOW`, confirms the opened
+directory is the same safe inode that was validated, and validates the endpoint
+through that directory descriptor. It then spawns only `codex app-server proxy
+--sock /proc/<Desktop PID>/fd/<fd>/<socket name>` for its own connection. The
+descriptor belongs to Desktop and is not inherited by the proxy as a fixed
+child descriptor. Each connection owns a separate descriptor, keeps it through
+the WebSocket handshake, and closes it after the connection opens or on any
+error, close, timeout, synchronous spawn failure, or disposal. This inode-binds
+validation and connection so replacing the configured parent path cannot
+redirect the proxy after validation.
+
+Attach-only mode never starts, stops, restarts, reclaims, unlinks, replaces, or
+uninstalls the external authority, its socket, or a bridge lock. Disconnecting
+or closing Desktop stops only Desktop's proxy child. The external supervisor
+remains solely responsible for authority startup, recovery, and shutdown.
 
 Attach-only validation fails closed. An unsafe or unavailable endpoint aborts
 the connection before a proxy is spawned, and Desktop does not fall back to
 Desktop-owned mode or to another transport. If the external authority later
 exits, Desktop does not restart it.
 
-In both modes, keep the socket within the owning user's trust boundary. It is a
-local control endpoint and must not be exposed directly over TCP or forwarded
-as a network service.
+In both modes, keep the socket within the owning user's trust boundary. The
+parent ownership and write restrictions prevent a different UID from replacing
+the socket leaf, but they do not defend against another process running as the
+same UID. Same-UID attackers are outside this feature's threat model. The socket
+is a local control endpoint and must not be exposed directly over TCP or
+forwarded as a network service.
 
 ## SSH setup
 
@@ -152,5 +165,7 @@ CODEX_CLI_PATH="/absolute/path/to/real/codex" node --test linux-features/shared-
 ```
 
 The feature depends on upstream's current local transport factory, WebSocket
-adapter, and `app-server proxy` command. Bundle drift causes the optional patch
-to warn and skip instead of modifying an unknown surface.
+adapter, and `app-server proxy` command. Once the feature is enabled, its bundle
+patch is required. Unsupported bundle drift or an inconsistent partial patch
+state is reported as `failed-required` and aborts the candidate build instead
+of producing an image without the requested behavior.
