@@ -43,6 +43,7 @@ function evaluate(root, dmg, overrides = {}) {
   return evaluateUpstreamDmg({
     dmgPath: dmg,
     coreReportPath: overrides.corePath ?? core,
+    buildInfoPath: overrides.buildInfoPath,
     buildStatus: overrides.buildStatus ?? "success",
     repoRoot: root,
   });
@@ -99,6 +100,68 @@ test("does not probe or block a disabled feature", () => withFixture(({ root, dm
   const decision = evaluate(root, dmg, { core });
   assert.equal(decision.verdict, "accepted");
   assert.equal(decision.blockers.length, 0);
+}));
+
+test("rejects an enabled shared app-server socket candidate with a missing or invalid attachment capability", () => withFixture(({ root, dmg }) => {
+  const core = requiredCoreReport();
+  core.enabledFeatures = ["shared-app-server-socket"];
+  const capability = "external-app-server-attachment-descriptor-v1";
+  const invalidCapabilities = [
+    undefined,
+    capability,
+    [capability, capability],
+    ["external-app-server-attachment-descriptor-v0"],
+  ];
+
+  for (const linuxCapabilities of invalidCapabilities) {
+    const buildInfo = {
+      schemaVersion: 1,
+      linuxFeatures: { enabled: ["shared-app-server-socket"] },
+    };
+    if (linuxCapabilities !== undefined) buildInfo.linuxCapabilities = linuxCapabilities;
+    const buildInfoPath = writeJson(root, `build-info-${String(linuxCapabilities)}.json`, buildInfo);
+    const decision = evaluate(root, dmg, { core, buildInfoPath });
+    assert.equal(decision.verdict, "rejected");
+    assert.ok(decision.blockers.some((item) => item.code === "external-attachment-capability"));
+  }
+
+  const completeBuildInfoPath = writeJson(root, "complete-build-info.json", {
+    schemaVersion: 1,
+    linuxFeatures: { enabled: ["shared-app-server-socket"] },
+    linuxCapabilities: [capability],
+  });
+  const completeDecision = evaluate(root, dmg, { core, buildInfoPath: completeBuildInfoPath });
+  assert.equal(completeDecision.verdict, "accepted");
+}));
+
+test("rejects missing attachment capability from enabled build metadata even without a core report", () => withFixture(({ root, dmg }) => {
+  const buildInfoPath = writeJson(root, "enabled-build-info.json", {
+    schemaVersion: 1,
+    linuxFeatures: { enabled: ["shared-app-server-socket"] },
+    linuxCapabilities: [],
+  });
+  const decision = evaluate(root, dmg, {
+    corePath: path.join(root, "missing-core.json"),
+    buildInfoPath,
+  });
+  assert.equal(decision.verdict, "rejected");
+  assert.ok(decision.blockers.some((item) => item.code === "external-attachment-capability"));
+}));
+
+test("does not require the attachment capability when the shared app-server socket feature is disabled", () => withFixture(({ root, dmg }) => {
+  const core = requiredCoreReport();
+  core.enabledFeatures = [];
+  const buildInfoPath = writeJson(root, "disabled-build-info.json", {
+    schemaVersion: 1,
+    linuxFeatures: { enabled: [] },
+    linuxCapabilities: [],
+  });
+  const decision = evaluate(root, dmg, { core, buildInfoPath });
+  assert.equal(decision.verdict, "accepted");
+  assert.equal(
+    decision.blockers.some((item) => item.code === "external-attachment-capability"),
+    false,
+  );
 }));
 
 test("the local and GitHub CLI surfaces use the same verdict", () => withFixture(({ root, dmg }) => {

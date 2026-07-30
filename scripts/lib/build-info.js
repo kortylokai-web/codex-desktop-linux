@@ -10,8 +10,174 @@ const {
 } = require("./linux-target-context.js");
 const {
   enabledLinuxFeatureIds,
+  enabledLinuxFeatureInstallPlan,
+  loadLinuxFeaturePatchDescriptors,
   linuxFeaturesRoot,
 } = require("./linux-features.js");
+
+const EXTERNAL_ATTACHMENT_CAPABILITY =
+  "external-app-server-attachment-descriptor-v1";
+const EXTERNAL_ATTACHMENT_FEATURE_ID = "shared-app-server-socket";
+const EXTERNAL_ATTACHMENT_PATCH_ID =
+  "feature:shared-app-server-socket:main-process-shared-app-server-socket";
+const EXTERNAL_ATTACHMENT_READER_TARGET =
+  ".codex-linux/features/shared-app-server-socket/descriptor-reader.js";
+const EXTERNAL_ATTACHMENT_LAUNCHER_HOOK_TARGET =
+  ".codex-linux/launcher.d/shared-app-server-socket-socket-env.sh";
+const EXTERNAL_ATTACHMENT_MAIN_BUNDLE_TARGET = ".vite/build/main.js";
+
+function pathStaysInside(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === ""
+    || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  );
+}
+
+function assertNoSymbolicLinksInPath(target, label) {
+  const absoluteTarget = path.resolve(target);
+  const root = path.parse(absoluteTarget).root;
+  let current = root;
+  for (const part of path.relative(root, absoluteTarget).split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    if (fs.lstatSync(current).isSymbolicLink()) {
+      throw new Error(`${label} must not contain symbolic links`);
+    }
+  }
+}
+
+function resolveStagedRegularFile(installDir, relativeTarget, label) {
+  const installPath = path.resolve(installDir);
+  assertNoSymbolicLinksInPath(installPath, "Linux feature install directory");
+  const installRoot = fs.realpathSync(installPath);
+  const targetPath = path.resolve(installPath, relativeTarget);
+  if (!pathStaysInside(installPath, targetPath)) {
+    throw new Error(`${label} must stay inside the install directory`);
+  }
+  assertNoSymbolicLinksInPath(targetPath, label);
+  const targetStat = fs.lstatSync(targetPath);
+  if (!targetStat.isFile()) {
+    throw new Error(`${label} must be a regular file`);
+  }
+  if (!pathStaysInside(installRoot, fs.realpathSync(targetPath))) {
+    throw new Error(`${label} must stay inside the install directory`);
+  }
+  return { targetPath, targetStat };
+}
+
+function stagedFeatureFileMatches(installDir, entry) {
+  try {
+    const sourceStat = fs.lstatSync(entry.source);
+    const { targetPath, targetStat } = resolveStagedRegularFile(
+      installDir,
+      entry.target,
+      "Linux feature staged artifact",
+    );
+    return sourceStat.isFile()
+      && (targetStat.mode & 0o7777) === entry.mode
+      && fs.readFileSync(targetPath).equals(fs.readFileSync(entry.source));
+  } catch {
+    return false;
+  }
+}
+
+function stagedMainBundleHasCompleteExternalAttachmentTransport(installDir, patchDescriptor) {
+  try {
+    const { targetPath } = resolveStagedRegularFile(
+      installDir,
+      EXTERNAL_ATTACHMENT_MAIN_BUNDLE_TARGET,
+      "Linux feature staged main bundle",
+    );
+    const mainBundle = fs.readFileSync(targetPath, "utf8");
+    let warned = false;
+    const originalWarn = console.warn;
+    console.warn = () => {
+      warned = true;
+    };
+    try {
+      return patchDescriptor.apply(mainBundle, {}) === mainBundle && !warned;
+    } finally {
+      console.warn = originalWarn;
+    }
+  } catch {
+    return false;
+  }
+}
+
+function externalAttachmentFeatureState({ featuresRoot, installDir }) {
+  const enabled = enabledLinuxFeatureIds({ featuresRoot });
+  if (!enabled.includes(EXTERNAL_ATTACHMENT_FEATURE_ID)) {
+    return { enabled: false, complete: false };
+  }
+
+  if (installDir == null) {
+    return { enabled: true, complete: false, reason: "install directory is unavailable" };
+  }
+
+  try {
+    const plan = enabledLinuxFeatureInstallPlan({ featuresRoot });
+    const reader = plan.resources.find(
+      (entry) =>
+        entry.id === EXTERNAL_ATTACHMENT_FEATURE_ID
+        && entry.target === EXTERNAL_ATTACHMENT_READER_TARGET
+        && entry.mode === 0o644,
+    );
+    const launcherHook = plan.runtimeHooks.find(
+      (entry) =>
+        entry.id === EXTERNAL_ATTACHMENT_FEATURE_ID
+        && entry.key === "launcher"
+        && entry.target === EXTERNAL_ATTACHMENT_LAUNCHER_HOOK_TARGET
+        && entry.mode === 0o755,
+    );
+    if (reader == null || launcherHook == null) {
+      return { enabled: true, complete: false, reason: "feature install plan is incomplete" };
+    }
+
+    const patchDescriptor = loadLinuxFeaturePatchDescriptors({ featuresRoot }).find(
+      (entry) =>
+        entry.id === EXTERNAL_ATTACHMENT_PATCH_ID
+        && entry.phase === "main-bundle"
+        && entry.ciPolicy === "required-upstream",
+    );
+    if (patchDescriptor == null || typeof patchDescriptor.apply !== "function") {
+      return { enabled: true, complete: false, reason: "required patch descriptor is unavailable" };
+    }
+
+    if (!stagedFeatureFileMatches(installDir, reader)) {
+      return { enabled: true, complete: false, reason: "staged descriptor reader does not match the enabled feature" };
+    }
+    if (!stagedFeatureFileMatches(installDir, launcherHook)) {
+      return { enabled: true, complete: false, reason: "staged launcher hook does not match the enabled feature" };
+    }
+    if (!stagedMainBundleHasCompleteExternalAttachmentTransport(installDir, patchDescriptor)) {
+      return { enabled: true, complete: false, reason: "staged main bundle lacks a complete attachment transport" };
+    }
+    return { enabled: true, complete: true };
+  } catch (error) {
+    return {
+      enabled: true,
+      complete: false,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function hasCompleteExternalAttachmentFeature(options) {
+  return externalAttachmentFeatureState(options).complete;
+}
+
+function linuxCapabilities({ featuresRoot, installDir }) {
+  const state = externalAttachmentFeatureState({ featuresRoot, installDir });
+  if (state.enabled && !state.complete) {
+    const error = new Error(
+      `Enabled Linux feature '${EXTERNAL_ATTACHMENT_FEATURE_ID}' cannot advertise `
+        + `'${EXTERNAL_ATTACHMENT_CAPABILITY}': ${state.reason ?? "incomplete installation"}`,
+    );
+    error.code = "external-attachment-capability-incomplete";
+    throw error;
+  }
+  return state.complete ? [EXTERNAL_ATTACHMENT_CAPABILITY] : [];
+}
 
 function runGit(repoDir, args) {
   const result = childProcess.spawnSync("git", ["-C", repoDir, ...args], {
@@ -286,6 +452,7 @@ function linuxTargetInfo(target) {
 
 function buildInfo(options) {
   const repoDir = path.resolve(options.repoDir);
+  const installDir = options.installDir == null ? null : path.resolve(options.installDir);
   const dmgPath = path.resolve(options.dmgPath);
   const appDir = path.resolve(options.appDir);
   const featuresRoot = linuxFeaturesRoot({ featuresRoot: options.featuresRoot });
@@ -311,6 +478,7 @@ function buildInfo(options) {
     linuxFeatures: {
       enabled: enabledLinuxFeatureIds({ featuresRoot }),
     },
+    linuxCapabilities: linuxCapabilities({ featuresRoot, installDir }),
   };
 }
 
@@ -339,6 +507,7 @@ function main() {
   }
   writeBuildInfo({
     repoDir,
+    installDir,
     dmgPath,
     appDir,
     electronVersion,
@@ -356,9 +525,13 @@ if (require.main === module) {
 }
 
 module.exports = {
+  EXTERNAL_ATTACHMENT_CAPABILITY,
+  EXTERNAL_ATTACHMENT_FEATURE_ID,
   buildInfo,
   githubCommitUrl,
+  hasCompleteExternalAttachmentFeature,
   isoTimestamp,
+  linuxCapabilities,
   packageProfile,
   sanitizeGitRemoteUrl,
   sourceInfo,

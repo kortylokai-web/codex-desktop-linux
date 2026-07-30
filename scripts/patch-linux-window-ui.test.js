@@ -146,6 +146,8 @@ const {
 } = require("./lib/linux-target-context.js");
 const {
   enabledLinuxFeatureIds,
+  loadLinuxFeaturePatchDescriptors,
+  stageEnabledLinuxFeatureInstall,
 } = require("./lib/linux-features.js");
 const {
   applyLinuxAppUpdaterBridgePatch,
@@ -160,6 +162,7 @@ const {
   githubCommitUrl,
   packageProfile,
   sourceInfo,
+  writeBuildInfo,
 } = require("./lib/build-info.js");
 const {
   createPatchReport,
@@ -725,6 +728,185 @@ test("build info captures DMG hash, features, distro profile, and source revisio
     assert.equal(info.packageProfile.packageManager, "apt");
     assert.deepEqual(info.linuxFeatures.enabled, ["read-aloud", "open-target-discovery"]);
     assert.equal(info.linuxFeatures.configPath, undefined);
+  } finally {
+    if (pinnedFeaturesConfig != null) {
+      process.env.CODEX_LINUX_FEATURES_CONFIG = pinnedFeaturesConfig;
+    }
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("build info advertises the external attachment capability only for a complete staged feature", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-build-info-attachment-"));
+  const pinnedFeaturesConfig = process.env.CODEX_LINUX_FEATURES_CONFIG;
+  delete process.env.CODEX_LINUX_FEATURES_CONFIG;
+  try {
+    const dmgPath = path.join(tempRoot, "Codex.dmg");
+    const appDir = path.join(tempRoot, "Codex.app");
+    const installDir = path.join(tempRoot, "install");
+    const featuresRoot = path.join(tempRoot, "linux-features");
+    const sharedFeatureDir = path.join(featuresRoot, "shared-app-server-socket");
+    const configPath = path.join(featuresRoot, "features.json");
+    const generatedBuildInfoPath = path.join(tempRoot, "metadata", "build-info.json");
+    const capability = "external-app-server-attachment-descriptor-v1";
+    const readerTarget = path.join(
+      installDir,
+      ".codex-linux",
+      "features",
+      "shared-app-server-socket",
+      "descriptor-reader.js",
+    );
+    const hookTarget = path.join(
+      installDir,
+      ".codex-linux",
+      "launcher.d",
+      "shared-app-server-socket-socket-env.sh",
+    );
+    const mainBundlePath = path.join(installDir, ".vite", "build", "main.js");
+    const attachmentSelector =
+      "if(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY===`1`){if(e.hostConfig.kind!==`local`)throw Error(`external app-server socket mode requires a local host`);if(!process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)throw Error(`external app-server socket mode requires CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET`);return new CodexLinuxExternalAppServerSocketTransport(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)}";
+    const stagedMainBundleFixture = () => [
+      "var Ky=class{options;kind=`websocket`;logger=r.i(`AppServerTransportSshWebsocket`);proxyStreams=new Set;supportsReconnect(){return!0}",
+      "async connect(){let t={current:null},r=new n.zn(Fy,{perMessageDeflate:!1,createConnection:()=>",
+      "(t.current=this.createSshProxyStream(),t.current)});return n.Ln(r,{onPongTimeout:()=>r.terminate()}),new n.Rn(r)}};",
+      "function n6(e){let t=Jy(e.hostConfig);if(t)return Z.info(`selected app-server transport`),new Ky(t);",
+      "if(e.transportKind===`remote-control`)return new Remote(e);",
+      "if(n.io(e.hostConfig))return new Wsl({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator});",
+      "let r=r6(e.hostConfig);if(r){e.desktopAuthAppServerClient;let t=p8(e.hostConfig,r);return new n.Fn({hostConfig:e.hostConfig,websocketUrl:r,getWebsocketProtocols:void 0,...t==null?{}:{socksProxyUrl:t}})}",
+      "return new n.Nn({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator})}function afterFactory(){}",
+    ].join("");
+
+    fs.writeFileSync(dmgPath, "fake dmg payload", "utf8");
+    fs.mkdirSync(path.join(appDir, "Contents"), { recursive: true });
+    fs.cpSync(
+      path.join(__dirname, "..", "linux-features", "shared-app-server-socket"),
+      sharedFeatureDir,
+      { recursive: true },
+    );
+
+    const buildAttachmentInfoOptions = () => ({
+      repoDir: tempRoot,
+      installDir,
+      dmgPath,
+      appDir,
+      electronVersion: "41.3.0",
+      appId: "codex-desktop",
+      appDisplayName: "ChatGPT Desktop",
+      featuresRoot,
+      env: { SOURCE_DATE_EPOCH: "1710000000" },
+      linuxTarget: detectLinuxTargetContext({
+        osReleaseFields: { ID: "ubuntu", ID_LIKE: "debian", VERSION_ID: "24.04" },
+        env: { PATH: "" },
+      }),
+    });
+    const buildAttachmentInfo = () => buildInfo(buildAttachmentInfoOptions());
+    const capabilities = () => buildAttachmentInfo().linuxCapabilities;
+    const enableSharedFeature = () => {
+      fs.writeFileSync(configPath, '{"enabled":["shared-app-server-socket"]}\n');
+      stageEnabledLinuxFeatureInstall(installDir, { featuresRoot });
+      const descriptor = loadLinuxFeaturePatchDescriptors({ featuresRoot }).find(
+        (entry) => entry.id === "feature:shared-app-server-socket:main-process-shared-app-server-socket",
+      );
+      assert.ok(descriptor);
+      fs.mkdirSync(path.dirname(mainBundlePath), { recursive: true });
+      fs.writeFileSync(mainBundlePath, descriptor.apply(stagedMainBundleFixture()));
+    };
+    const assertIncompleteFeature = (label, options = buildAttachmentInfoOptions()) => {
+      assert.throws(
+        () => writeBuildInfo({ ...options, outputPaths: [generatedBuildInfoPath] }),
+        (error) => {
+          assert.equal(error?.code, "external-attachment-capability-incomplete");
+          assert.match(error.message, /shared-app-server-socket/);
+          return true;
+        },
+        label,
+      );
+      assert.equal(fs.existsSync(generatedBuildInfoPath), false, label);
+    };
+
+    enableSharedFeature();
+    const completeInfo = buildAttachmentInfo();
+    assert.equal(completeInfo.schemaVersion, 1);
+    assert.equal(Array.isArray(completeInfo.linuxCapabilities), true);
+    assert.deepEqual(completeInfo.linuxCapabilities, [capability]);
+
+    fs.writeFileSync(configPath, '{"enabled":[]}\n');
+    assert.deepEqual(capabilities(), []);
+
+    fs.writeFileSync(configPath, '{"enabled":["unrelated-feature"]}\n');
+    assert.deepEqual(capabilities(), []);
+
+    enableSharedFeature();
+    fs.rmSync(readerTarget);
+    assertIncompleteFeature("missing staged descriptor reader must fail build metadata generation");
+
+    enableSharedFeature();
+    fs.rmSync(hookTarget);
+    assertIncompleteFeature("missing staged launcher hook must fail build metadata generation");
+
+    enableSharedFeature();
+    fs.writeFileSync(readerTarget, "staging drift\n");
+    assertIncompleteFeature("staged resource drift must fail build metadata generation");
+
+    enableSharedFeature();
+    const symlinkedInstallDir = path.join(tempRoot, "symlinked-install");
+    fs.symlinkSync(installDir, symlinkedInstallDir, "dir");
+    assertIncompleteFeature(
+      "a symlinked install root must fail build metadata generation",
+      { ...buildAttachmentInfoOptions(), installDir: symlinkedInstallDir },
+    );
+    fs.unlinkSync(symlinkedInstallDir);
+
+    enableSharedFeature();
+    const featureResourcesParent = path.dirname(path.dirname(readerTarget));
+    const outsideFeatureResources = path.join(tempRoot, "outside-feature-resources");
+    fs.cpSync(featureResourcesParent, outsideFeatureResources, { recursive: true });
+    fs.rmSync(featureResourcesParent, { recursive: true });
+    fs.symlinkSync(outsideFeatureResources, featureResourcesParent, "dir");
+    assertIncompleteFeature("a symlinked staged resource parent must fail build metadata generation");
+    fs.unlinkSync(featureResourcesParent);
+    fs.cpSync(outsideFeatureResources, featureResourcesParent, { recursive: true });
+
+    enableSharedFeature();
+    const outsideMainBundle = path.join(tempRoot, "outside-main.js");
+    fs.copyFileSync(mainBundlePath, outsideMainBundle);
+    fs.rmSync(mainBundlePath);
+    fs.symlinkSync(outsideMainBundle, mainBundlePath);
+    assertIncompleteFeature("a symlinked staged main bundle must fail build metadata generation");
+    fs.unlinkSync(mainBundlePath);
+    fs.copyFileSync(outsideMainBundle, mainBundlePath);
+
+    enableSharedFeature();
+    fs.chmodSync(readerTarget, 0o4644);
+    assertIncompleteFeature("a staged reader with special permission bits must fail build metadata generation");
+
+    enableSharedFeature();
+    fs.chmodSync(hookTarget, 0o2755);
+    assertIncompleteFeature("a staged launcher hook with special permission bits must fail build metadata generation");
+
+    enableSharedFeature();
+    // The feature source still contains every legacy token. Only the built main
+    // bundle lost the selector, so this proves metadata validates installed truth.
+    fs.writeFileSync(
+      mainBundlePath,
+      fs.readFileSync(mainBundlePath, "utf8").replace(attachmentSelector, ""),
+    );
+    assertIncompleteFeature("a partial selector must fail build metadata generation");
+
+    enableSharedFeature();
+    const completeMainBundle = fs.readFileSync(mainBundlePath, "utf8");
+    const attachmentClassIndex = completeMainBundle.indexOf(
+      "class CodexLinuxExternalAppServerSocketTransport",
+    );
+    assert.notEqual(attachmentClassIndex, -1);
+    fs.writeFileSync(
+      mainBundlePath,
+      completeMainBundle.slice(0, attachmentClassIndex) + completeMainBundle.slice(attachmentClassIndex).replace(
+        "supportsReconnect(){return!0}",
+        "supportsReconnect(){return!1}",
+      ),
+    );
+    assertIncompleteFeature("a partial transport must fail build metadata generation");
   } finally {
     if (pinnedFeaturesConfig != null) {
       process.env.CODEX_LINUX_FEATURES_CONFIG = pinnedFeaturesConfig;

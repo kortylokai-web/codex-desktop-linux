@@ -85,6 +85,25 @@ staging the currently enabled set, so disabling a feature removes its
 framework-owned runtime hooks. Legacy `stage.sh` hooks are not tracked by this
 manifest and must clean up any feature-owned files themselves.
 
+## Build Capabilities
+
+Schema-1 Linux build information includes a top-level `linuxCapabilities`
+array. A capability is a narrow statement about an installed app payload, not
+about every enabled feature id. A feature may advertise a capability only when
+its required patch descriptor accepts the staged main bundle as already
+complete and its declared resources and executable runtime hooks are staged
+byte-for-byte with their declared modes, without symbolic-link path components
+or undeclared special permission bits. A disabled feature leaves the
+capability out of the build information. If an enabled feature is missing,
+changed, or incomplete, build metadata generation fails instead of publishing
+a successful payload with an omitted capability.
+
+The launcher accepts `--print-build-info` as its first argument for inspection
+tools. It reads and prints its own
+`resources/codex-linux-build-info.json` byte-for-byte, then exits before
+feature hooks, launcher setup, webview startup, Electron, updater interaction,
+or warm-start handling. Arguments after the inspection flag are ignored.
+
 ## Manifest Keys
 
 `entrypoints` declares optional feature code hooks. Feature patching uses only

@@ -4,7 +4,11 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { sourceInfo } = require("./build-info.js");
+const {
+  EXTERNAL_ATTACHMENT_CAPABILITY,
+  EXTERNAL_ATTACHMENT_FEATURE_ID,
+  sourceInfo,
+} = require("./build-info.js");
 const { enabledFeatureFailuresFromReport, optionalDriftFromReport } = require("./patch-report.js");
 const { readPatchReport, validatePatchReport } = require("./patch-validation.js");
 const { UPSTREAM_DMG_RELEASE_PROFILE } = require("./upstream-dmg-release-profile.js");
@@ -118,6 +122,32 @@ function buildDmgInfo({ dmgPath, metadata, buildInfo }) {
   };
 }
 
+function externalAttachmentCapabilityBlockers(coreReport, buildInfo) {
+  const enabledFeatures = new Set([
+    ...(Array.isArray(coreReport?.enabledFeatures) ? coreReport.enabledFeatures : []),
+    ...(Array.isArray(buildInfo?.linuxFeatures?.enabled) ? buildInfo.linuxFeatures.enabled : []),
+  ].filter((feature) => typeof feature === "string"));
+  if (!enabledFeatures.has(EXTERNAL_ATTACHMENT_FEATURE_ID)) {
+    return [];
+  }
+
+  const capabilities = buildInfo?.linuxCapabilities;
+  const capabilityCount = Array.isArray(capabilities)
+    ? capabilities.filter((capability) => capability === EXTERNAL_ATTACHMENT_CAPABILITY).length
+    : 0;
+  if (capabilityCount === 1) {
+    return [];
+  }
+
+  return [{
+    code: "external-attachment-capability",
+    check: `feature:${EXTERNAL_ATTACHMENT_FEATURE_ID}`,
+    name: EXTERNAL_ATTACHMENT_CAPABILITY,
+    status: "failed",
+    reason: `Enabled feature '${EXTERNAL_ATTACHMENT_FEATURE_ID}' requires capability '${EXTERNAL_ATTACHMENT_CAPABILITY}' exactly once`,
+  }];
+}
+
 function evaluateUpstreamDmg(options) {
   const profile = options.profile ?? UPSTREAM_DMG_RELEASE_PROFILE;
   let metadata = null;
@@ -156,6 +186,7 @@ function evaluateUpstreamDmg(options) {
   } else {
     inconclusiveReasons.push(core.error);
   }
+  blockers.push(...externalAttachmentCapabilityBlockers(core.report, buildInfo));
 
   if (options.buildStatus !== "success") {
     inconclusiveReasons.push(`candidate build status: ${options.buildStatus ?? "unknown"}`);
