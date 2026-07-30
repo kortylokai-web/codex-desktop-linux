@@ -6,6 +6,13 @@
   "entrypoints": {
     "patchDescriptors": "./patch.js"
   },
+  "resources": [
+    {
+      "source": "descriptor-reader.js",
+      "target": ".codex-linux/features/shared-app-server-socket/descriptor-reader.js",
+      "mode": "0644"
+    }
+  ],
   "runtimeHooks": {
     "launcher": {
       "source": "socket-env.sh",

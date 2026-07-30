@@ -31,10 +31,99 @@ const {
 } = require("./patch.js");
 
 const socketEnvHook = path.join(__dirname, "socket-env.sh");
+const descriptorReader = path.join(__dirname, "descriptor-reader.js");
 const expectedPatchSentinel = "/*codex-linux:shared-app-server-socket:v2*/";
 const unixSocketPathMaxBytes = 107;
 const attachmentSelectorSource =
   "if(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY===`1`){if(e.hostConfig.kind!==`local`)throw Error(`external app-server socket mode requires a local host`);if(!process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)throw Error(`external app-server socket mode requires CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET`);return new CodexLinuxExternalAppServerSocketTransport(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)}";
+
+function loadDescriptorReader() {
+  assert.equal(
+    fs.existsSync(descriptorReader),
+    true,
+    "descriptor reader must exist before its behavior can be used",
+  );
+  return require(descriptorReader);
+}
+
+function withDescriptorTree(callback, { appId = "desktop-attachment-test" } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-descriptor-"));
+  const configRoot = path.join(root, "config");
+  const descriptorDir = path.join(configRoot, appId);
+  const descriptorPath = path.join(descriptorDir, "app-server-attachment.json");
+  fs.mkdirSync(descriptorDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(descriptorDir, 0o700);
+  try {
+    return callback({ appId, configRoot, descriptorDir, descriptorPath, root });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function writeDescriptor(descriptorPath, source, mode = 0o600) {
+  fs.writeFileSync(descriptorPath, source, { mode });
+  fs.chmodSync(descriptorPath, mode);
+}
+
+function descriptorSource(socketPath, { transport = "unix", version = 1 } = {}) {
+  return `${JSON.stringify({ schemaVersion: version, socketPath, transport })}\n`;
+}
+
+function copyStatWithUid(stat, uid) {
+  return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid });
+}
+
+function withUidMismatch(targetPath, callback) {
+  const originalFstat = fs.fstatSync;
+  const originalLstat = fs.lstatSync;
+  const originalOpen = fs.openSync;
+  const targetFds = new Set();
+  fs.lstatSync = (candidate, ...args) => {
+    const stat = originalLstat(candidate, ...args);
+    const mismatchUid = typeof stat.uid === "bigint" ? stat.uid + 1n : stat.uid + 1;
+    return candidate === targetPath ? copyStatWithUid(stat, mismatchUid) : stat;
+  };
+  fs.openSync = (candidate, ...args) => {
+    const fd = originalOpen(candidate, ...args);
+    if (candidate === targetPath) targetFds.add(fd);
+    return fd;
+  };
+  fs.fstatSync = (fd, ...args) => {
+    const stat = originalFstat(fd, ...args);
+    const mismatchUid = typeof stat.uid === "bigint" ? stat.uid + 1n : stat.uid + 1;
+    return targetFds.has(fd) ? copyStatWithUid(stat, mismatchUid) : stat;
+  };
+  try {
+    return callback();
+  } finally {
+    fs.fstatSync = originalFstat;
+    fs.lstatSync = originalLstat;
+    fs.openSync = originalOpen;
+  }
+}
+
+function hookEnvironment(tree, { managedNodeSource = null } = {}) {
+  const appDir = path.join(tree.root, "app");
+  const managedNode = path.join(appDir, "resources", "node-runtime", "bin", "node");
+  fs.mkdirSync(path.dirname(managedNode), { recursive: true, mode: 0o700 });
+  if (managedNodeSource == null) {
+    fs.symlinkSync(process.execPath, managedNode);
+  } else {
+    fs.writeFileSync(managedNode, managedNodeSource, { mode: 0o700 });
+    fs.chmodSync(managedNode, 0o700);
+  }
+  const env = {
+    ...process.env,
+    CODEX_LINUX_APP_DIR: appDir,
+    CODEX_LINUX_APP_ID: tree.appId,
+    CODEX_LINUX_FEATURES_DIR: path.resolve(__dirname, ".."),
+    HOME: tree.root,
+    XDG_CONFIG_HOME: tree.configRoot,
+  };
+  delete env.CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY;
+  delete env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET;
+  return env;
+}
 
 function withFeatureConfig(enabled, callback) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-socket-feature-"));
@@ -490,19 +579,404 @@ test("shared-app-server-socket stays disabled until explicitly enabled", () => {
   });
 });
 
-test("feature stages only the socket environment hook", () => {
+test("feature stages the descriptor reader resource and executable socket hook", () => {
   withFeatureConfig(["shared-app-server-socket"], (featuresRoot) => {
     const appDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-socket-app-"));
     try {
       const plan = stageEnabledLinuxFeatureInstall(appDir, { featuresRoot });
       assert.deepEqual(
+        plan.resources.map((resource) => [resource.target, resource.mode.toString(8)]),
+        [[".codex-linux/features/shared-app-server-socket/descriptor-reader.js", "644"]],
+      );
+      assert.deepEqual(
         plan.runtimeHooks.map((hook) => [hook.key, path.basename(hook.target), hook.mode.toString(8)]),
         [["launcher", "shared-app-server-socket-socket-env.sh", "755"]],
+      );
+      assert.equal(
+        fs.statSync(
+          path.join(
+            appDir,
+            ".codex-linux",
+            "features",
+            "shared-app-server-socket",
+            "descriptor-reader.js",
+          ),
+        ).mode & 0o777,
+        0o644,
       );
     } finally {
       fs.rmSync(appDir, { recursive: true, force: true });
     }
   });
+});
+
+test("descriptor reader accepts the exact schema regardless of key order or whitespace", () => {
+  const reader = loadDescriptorReader();
+  assert.equal(reader.DESCRIPTOR_SCHEMA_VERSION, 1);
+  assert.deepEqual(reader.DESCRIPTOR_KEYS, ["schemaVersion", "socketPath", "transport"]);
+  withDescriptorTree((tree) => {
+    const socketPath = "/tmp/attachment-test.sock";
+    writeDescriptor(
+      tree.descriptorPath,
+      ` \n { \"transport\" : \"unix\", \"socketPath\" : \"${socketPath}\", \"schemaVersion\" : 1 } \n`,
+    );
+    const descriptor = reader.readAttachmentDescriptor(tree.descriptorPath);
+    assert.deepEqual(descriptor, { socketPath });
+    assert.deepEqual(reader.routingRecords(descriptor), [
+      "env CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY=1",
+      `env CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET=${socketPath}`,
+    ]);
+  });
+});
+
+test("descriptor reader accepts duplicate JSON keys and unbounded descriptor records", () => {
+  const reader = loadDescriptorReader();
+  withDescriptorTree((tree) => {
+    const socketPath = `/${"socket".repeat(3000)}`;
+    writeDescriptor(
+      tree.descriptorPath,
+      `${" ".repeat(20000)}{\"schemaVersion\":1,\"socketPath\":\"/ignored.sock\",\"socketPath\":\"${socketPath}\",\"transport\":\"unix\"}`,
+    );
+    assert.deepEqual(reader.readAttachmentDescriptor(tree.descriptorPath), { socketPath });
+  });
+});
+
+test("descriptor reader treats only an absent descriptor as an ordinary no-op", () => {
+  const reader = loadDescriptorReader();
+  withDescriptorTree((tree) => {
+    assert.equal(reader.readAttachmentDescriptor(tree.descriptorPath), null);
+  });
+});
+
+test("descriptor reader rejects schema and socket-path violations", async (t) => {
+  const cases = [
+    ["non-object", "[]"],
+    ["missing key", JSON.stringify({ schemaVersion: 1, socketPath: "/tmp/socket" })],
+    [
+      "extra key",
+      JSON.stringify({ schemaVersion: 1, socketPath: "/tmp/socket", transport: "unix", extra: true }),
+    ],
+    ["noninteger version", descriptorSource("/tmp/socket", { version: 1.5 })],
+    ["wrong version", descriptorSource("/tmp/socket", { version: 2 })],
+    ["wrong transport", descriptorSource("/tmp/socket", { transport: "tcp" })],
+    ["empty socket path", descriptorSource("")],
+    ["relative socket path", descriptorSource("relative/socket")],
+    ["nonnormal socket path", descriptorSource("/tmp/../tmp/socket")],
+    ["NUL socket path", descriptorSource("/tmp/socket\u0000suffix")],
+    ["CR socket path", descriptorSource("/tmp/socket\r")],
+    ["LF socket path", descriptorSource("/tmp/socket\n")],
+    ["C0 socket path", descriptorSource("/tmp/socket\u0001")],
+  ];
+  for (const [name, source] of cases) {
+    await t.test(name, () => {
+      const reader = loadDescriptorReader();
+      withDescriptorTree((tree) => {
+        writeDescriptor(tree.descriptorPath, source);
+        assert.throws(
+          () => reader.readAttachmentDescriptor(tree.descriptorPath),
+          /attachment descriptor/i,
+        );
+      });
+    });
+  }
+});
+
+test("descriptor reader independently rejects parent and descriptor owner mismatches", async (t) => {
+  await t.test("parent owner mismatch", () => {
+    const reader = loadDescriptorReader();
+    withDescriptorTree((tree) => {
+      writeDescriptor(tree.descriptorPath, descriptorSource("/tmp/socket"));
+      withUidMismatch(tree.descriptorDir, () => {
+        assert.throws(
+          () => reader.readAttachmentDescriptor(tree.descriptorPath),
+          /parent has an unexpected owner/i,
+        );
+      });
+    });
+  });
+
+  await t.test("descriptor owner mismatch", () => {
+    const reader = loadDescriptorReader();
+    withDescriptorTree((tree) => {
+      writeDescriptor(tree.descriptorPath, descriptorSource("/tmp/socket"));
+      withUidMismatch(tree.descriptorPath, () => {
+        assert.throws(
+          () => reader.readAttachmentDescriptor(tree.descriptorPath),
+          /has an unexpected owner/i,
+        );
+      });
+    });
+  });
+});
+
+test("descriptor reader rejects unsafe descriptor files and parents", async (t) => {
+  const cases = [
+    ["wrong mode", (tree) => {
+      fs.chmodSync(tree.descriptorPath, 0o644);
+      return {};
+    }],
+    ["nonregular descriptor", (tree) => {
+      fs.rmSync(tree.descriptorPath);
+      fs.mkdirSync(tree.descriptorPath, { mode: 0o700 });
+      return {};
+    }],
+    ["descriptor symlink", (tree) => {
+      const target = path.join(tree.root, "descriptor-target.json");
+      fs.renameSync(tree.descriptorPath, target);
+      fs.symlinkSync(target, tree.descriptorPath);
+      return {};
+    }],
+    ["unsafe writable parent", (tree) => {
+      fs.chmodSync(tree.descriptorDir, 0o722);
+      return {};
+    }],
+  ];
+  for (const [name, prepare] of cases) {
+    await t.test(name, () => {
+      const reader = loadDescriptorReader();
+      withDescriptorTree((tree) => {
+        writeDescriptor(tree.descriptorPath, descriptorSource("/tmp/socket"));
+        const options = prepare(tree);
+        assert.throws(
+          () => reader.readAttachmentDescriptor(tree.descriptorPath, options.expectedUid),
+          /attachment descriptor/i,
+        );
+      });
+    });
+  }
+});
+
+test("descriptor reader rejects replacement races before opening the descriptor", () => {
+  const reader = loadDescriptorReader();
+  withDescriptorTree((tree) => {
+    const replacement = path.join(tree.root, "replacement.json");
+    writeDescriptor(tree.descriptorPath, descriptorSource("/tmp/original.sock"));
+    writeDescriptor(replacement, descriptorSource("/tmp/replacement.sock"));
+    const originalOpen = fs.openSync;
+    const originalReadFile = fs.readFileSync;
+    let readDescriptor = false;
+    let replaced = false;
+    fs.openSync = (candidate, ...args) => {
+      if (!replaced && candidate === tree.descriptorPath) {
+        fs.renameSync(replacement, tree.descriptorPath);
+        replaced = true;
+      }
+      return originalOpen(candidate, ...args);
+    };
+    fs.readFileSync = (target, ...args) => {
+      if (typeof target === "number") readDescriptor = true;
+      return originalReadFile(target, ...args);
+    };
+    try {
+      assert.throws(
+        () => reader.readAttachmentDescriptor(tree.descriptorPath),
+        /attachment descriptor/i,
+      );
+      assert.equal(replaced, true, "test must replace the descriptor immediately before its open");
+      assert.equal(readDescriptor, false, "pre-open replacement must reject before reading the replacement");
+    } finally {
+      fs.openSync = originalOpen;
+      fs.readFileSync = originalReadFile;
+    }
+  });
+});
+
+test("descriptor reader promptly rejects a FIFO swapped immediately before open", { timeout: 2000 }, (t) => {
+  if (process.platform !== "linux") {
+    t.skip("FIFO race coverage is Linux-specific");
+    return;
+  }
+  withDescriptorTree((tree) => {
+    const fifoPath = path.join(tree.root, "replacement.fifo");
+    writeDescriptor(tree.descriptorPath, descriptorSource("/tmp/original.sock"));
+    const mkfifo = spawnSync("mkfifo", [fifoPath], { encoding: "utf8" });
+    assert.equal(mkfifo.status, 0, mkfifo.stderr);
+    const source = [
+      "const fs=require('node:fs');",
+      "const descriptorPath=process.argv[1];",
+      "const fifoPath=process.argv[2];",
+      "const readerPath=process.argv[3];",
+      "const openSync=fs.openSync;",
+      "let swapped=false;",
+      "fs.openSync=(candidate,flags,...args)=>{if(!swapped&&candidate===descriptorPath){fs.renameSync(fifoPath,descriptorPath);swapped=true}return openSync(candidate,flags,...args)};",
+      "const {readAttachmentDescriptor,routingRecords}=require(readerPath);",
+      "try{const descriptor=readAttachmentDescriptor(descriptorPath);if(descriptor)process.stdout.write(`${routingRecords(descriptor).join('\\n')}\\n`)}catch{process.stderr.write('descriptor rejected\\n');process.exitCode=1}",
+    ].join("");
+    const result = spawnSync(
+      process.execPath,
+      ["-e", source, tree.descriptorPath, fifoPath, descriptorReader],
+      { encoding: "utf8", timeout: 1000 },
+    );
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.signal, null, result.stderr);
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr, "descriptor rejected\n");
+  });
+});
+
+test("descriptor reader rejects replacement races after reading before path reinspection", () => {
+  const reader = loadDescriptorReader();
+  withDescriptorTree((tree) => {
+    const replacement = path.join(tree.root, "replacement.json");
+    writeDescriptor(tree.descriptorPath, descriptorSource("/tmp/original.sock"));
+    writeDescriptor(replacement, descriptorSource("/tmp/replacement.sock"));
+    const originalReadFile = fs.readFileSync;
+    let replaced = false;
+    fs.readFileSync = (target, ...args) => {
+      const source = originalReadFile(target, ...args);
+      if (!replaced && typeof target === "number") {
+        fs.renameSync(replacement, tree.descriptorPath);
+        replaced = true;
+      }
+      return source;
+    };
+    const routing = [];
+    let failure = null;
+    try {
+      const descriptor = reader.readAttachmentDescriptor(tree.descriptorPath);
+      routing.push(...reader.routingRecords(descriptor));
+    } catch (error) {
+      failure = error;
+    } finally {
+      fs.readFileSync = originalReadFile;
+    }
+    assert.equal(replaced, true, "test must replace the descriptor after its real file descriptor is read");
+    assert.match(failure?.message ?? "", /attachment descriptor/i);
+    assert.deepEqual(routing, [], "post-read revalidation rejection must emit no routing records");
+  });
+});
+
+test("descriptor reader rejects same-inode mutation during the descriptor read", () => {
+  const reader = loadDescriptorReader();
+  withDescriptorTree((tree) => {
+    const originalSource = descriptorSource("/tmp/original.sock");
+    const mutatedSource = descriptorSource("/tmp/changed0.sock");
+    assert.equal(Buffer.byteLength(mutatedSource), Buffer.byteLength(originalSource));
+    writeDescriptor(tree.descriptorPath, originalSource);
+    const before = fs.lstatSync(tree.descriptorPath, { bigint: true });
+    const originalReadFile = fs.readFileSync;
+    let mutated = false;
+    fs.readFileSync = (target, ...args) => {
+      const source = originalReadFile(target, ...args);
+      if (!mutated && typeof target === "number") {
+        fs.writeFileSync(tree.descriptorPath, mutatedSource);
+        mutated = true;
+      }
+      return source;
+    };
+    const routing = [];
+    let failure = null;
+    try {
+      const descriptor = reader.readAttachmentDescriptor(tree.descriptorPath);
+      routing.push(...reader.routingRecords(descriptor));
+    } catch (error) {
+      failure = error;
+    } finally {
+      fs.readFileSync = originalReadFile;
+    }
+    const after = fs.lstatSync(tree.descriptorPath, { bigint: true });
+    assert.equal(mutated, true, "test must mutate the descriptor after its file descriptor is read");
+    assert.equal(before.dev, after.dev);
+    assert.equal(before.ino, after.ino);
+    assert.match(failure?.message ?? "", /attachment descriptor/i);
+    assert.deepEqual(routing, [], "same-inode mutation rejection must emit no routing records");
+  });
+});
+
+test("socket hook routes nothing when the descriptor is absent", () => {
+  withDescriptorTree((tree) => {
+    const result = spawnSync(socketEnvHook, [], {
+      encoding: "utf8",
+      env: hookEnvironment(tree),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr, "");
+  });
+});
+
+test("socket hook emits exactly the attachment routing records for a valid descriptor", () => {
+  withDescriptorTree((tree) => {
+    const socketPath = "/tmp/selected-by-descriptor.sock";
+    writeDescriptor(tree.descriptorPath, descriptorSource(socketPath));
+    const result = spawnSync(socketEnvHook, [], {
+      encoding: "utf8",
+      env: hookEnvironment(tree),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(
+      result.stdout,
+      "env CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY=1\n" +
+        `env CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET=${socketPath}\n`,
+    );
+    assert.equal(result.stderr, "");
+  });
+});
+
+test("socket hook rejects invalid descriptors with one redaction-safe diagnostic and no routing", () => {
+  withDescriptorTree((tree) => {
+    const unsafeSocketPath = "relative\nsecret";
+    writeDescriptor(tree.descriptorPath, descriptorSource(unsafeSocketPath));
+    const result = spawnSync(socketEnvHook, [], {
+      encoding: "utf8",
+      env: hookEnvironment(tree),
+    });
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /attachment descriptor/i);
+    assert.equal(result.stderr.trim().split("\n").length, 1);
+    assert.equal(result.stderr.includes(tree.root), false);
+    assert.equal(result.stderr.includes(unsafeSocketPath), false);
+  });
+});
+
+test("socket hook preserves explicitly configured development routing without reading a descriptor", () => {
+  for (const explicitEnv of [
+    { CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY: "1" },
+    { CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET: "/tmp/explicit-development.sock" },
+  ]) {
+    withDescriptorTree((tree) => {
+      writeDescriptor(tree.descriptorPath, "not valid JSON");
+      const result = spawnSync(socketEnvHook, [], {
+        encoding: "utf8",
+        env: { ...hookEnvironment(tree), ...explicitEnv },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, "");
+      assert.equal(result.stderr, "");
+    });
+  }
+});
+
+test("socket hook propagates an injected reader failure without fallback routing", () => {
+  withDescriptorTree((tree) => {
+    const result = spawnSync(socketEnvHook, [], {
+      encoding: "utf8",
+      env: hookEnvironment(tree, {
+        managedNodeSource: "#!/usr/bin/env bash\nprintf '%s\\n' 'forced reader failure' >&2\nexit 73\n",
+      }),
+    });
+    assert.equal(result.status, 73);
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr, "forced reader failure\n");
+  });
+});
+
+test("descriptor reader and hook contain no app-server lifecycle primitives", () => {
+  assert.equal(fs.existsSync(descriptorReader), true, "descriptor reader must exist");
+  const source = `${fs.readFileSync(descriptorReader, "utf8")}\n${fs.readFileSync(socketEnvHook, "utf8")}`;
+  for (const primitive of [
+    /node:child_process/,
+    /\bspawn\b/,
+    /app-server\s+--listen/,
+    /app-server\s+proxy/,
+    /unlinkSync/,
+    /createServer/,
+    /createConnection/,
+  ]) {
+    assert.doesNotMatch(source, primitive);
+  }
 });
 
 test("patch selects the bridge only for the local host and is idempotent", () => {
@@ -1635,27 +2109,6 @@ test("descriptor is required-upstream and targets the main bundle", () => {
     descriptors.map(({ id, phase, ciPolicy }) => [id, phase, ciPolicy]),
     [["main-process-shared-app-server-socket", "main-bundle", "required-upstream"]],
   );
-});
-
-test("socket hook exports an instance-scoped path without starting a process", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-socket-runtime-"));
-  const env = {
-    ...process.env,
-    CODEX_LINUX_APP_ID: "codex-bridge-test",
-    CODEX_LINUX_APP_STATE_DIR: path.join(tempDir, "state"),
-    XDG_RUNTIME_DIR: tempDir,
-  };
-  delete env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET;
-  try {
-    const result = spawnSync(socketEnvHook, [], { encoding: "utf8", env });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(
-      result.stdout.trim(),
-      `env CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET=${tempDir}/codex-bridge-test/app-server-bridge/app-server.sock`,
-    );
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
 });
 
 test("injected transport rejects an existing socket without unlinking it", async () => {
