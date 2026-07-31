@@ -2527,6 +2527,33 @@ SCRIPT
     assert_contains "$workspace/install-explicit.out" "CALL:<--install><$explicit_dmg>"
 }
 
+test_candidate_build_transaction_artifacts_are_ignored() {
+    info "Checking candidate build transaction artifacts stay outside Git"
+    local path
+    local -a ignored_paths=(
+        "codex-app-next.backup-contract/"
+        ".codex-app-next.candidate-contract/"
+        ".codex-app-next.promotion.json"
+        ".codex-app-next.promotion.lock"
+    )
+    local -a unignored_paths=(
+        "codex-app-next.backup"
+        ".codex-app-next.candidate"
+        ".codex-app-next.promotion.json.tmp"
+        ".codex-app-next.promotion.lock.tmp"
+    )
+
+    for path in "${ignored_paths[@]}"; do
+        git -C "$REPO_DIR" check-ignore -q -- "$path" \
+            || fail "Expected candidate build transaction path to be ignored: $path"
+    done
+    for path in "${unignored_paths[@]}"; do
+        if git -C "$REPO_DIR" check-ignore -q -- "$path"; then
+            fail "Did not expect unrelated path to be ignored: $path"
+        fi
+    done
+}
+
 test_candidate_install_is_transactional() {
     info "Checking atomic candidate promotion, first install, and rollback"
     local workspace="$TMP_DIR/candidate-install"
@@ -10935,6 +10962,7 @@ main() {
     test_fresh_reuse_dmg_uses_cache_when_metadata_matches
     test_rebuild_candidate_uses_validated_default_dmg
     test_make_rebuild_targets_omit_empty_dmg_argument
+    test_candidate_build_transaction_artifacts_are_ignored
     test_candidate_install_is_transactional
     test_candidate_promotion_stops_when_journal_prepare_fails
     test_candidate_prepare_failure_cleans_transaction_metadata
