@@ -14,6 +14,7 @@ write_build_info() {
         "$INSTALL_DIR" \
         "$dmg_path" \
         "$app_dir" \
+        "$WORK_DIR/app-extracted" \
         "$ELECTRON_VERSION" \
         "$CODEX_APP_ID" \
         "$CODEX_APP_DISPLAY_NAME"

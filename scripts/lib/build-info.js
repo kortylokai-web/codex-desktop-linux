@@ -24,7 +24,7 @@ const EXTERNAL_ATTACHMENT_READER_TARGET =
   ".codex-linux/features/shared-app-server-socket/descriptor-reader.js";
 const EXTERNAL_ATTACHMENT_LAUNCHER_HOOK_TARGET =
   ".codex-linux/launcher.d/shared-app-server-socket-socket-env.sh";
-const EXTERNAL_ATTACHMENT_MAIN_BUNDLE_TARGET = ".vite/build/main.js";
+const EXTERNAL_ATTACHMENT_MAIN_BUNDLE_PATTERN = /^main(?:-[^.]+)?\.js$/;
 
 function pathStaysInside(root, candidate) {
   const relative = path.relative(root, candidate);
@@ -65,6 +65,51 @@ function resolveStagedRegularFile(installDir, relativeTarget, label) {
   return { targetPath, targetStat };
 }
 
+function resolveExtractedMainBundle(extractedAppRoot) {
+  const extractedPath = path.resolve(extractedAppRoot);
+  assertNoSymbolicLinksInPath(extractedPath, "Extracted app root");
+  if (!fs.lstatSync(extractedPath).isDirectory()) {
+    throw new Error("Extracted app root must be a directory");
+  }
+  const extractedRoot = fs.realpathSync(extractedPath);
+  const buildDirectory = path.resolve(extractedPath, ".vite", "build");
+  if (!pathStaysInside(extractedPath, buildDirectory)) {
+    throw new Error("Extracted main bundle directory must stay inside the extracted app root");
+  }
+  assertNoSymbolicLinksInPath(buildDirectory, "Extracted main bundle directory");
+  if (!fs.lstatSync(buildDirectory).isDirectory()) {
+    throw new Error("Extracted main bundle directory must be a directory");
+  }
+  const buildRoot = fs.realpathSync(buildDirectory);
+  if (!pathStaysInside(extractedRoot, buildRoot)) {
+    throw new Error("Extracted main bundle directory must stay inside the extracted app root");
+  }
+
+  const candidates = fs
+    .readdirSync(buildDirectory, { withFileTypes: true })
+    .filter((entry) => EXTERNAL_ATTACHMENT_MAIN_BUNDLE_PATTERN.test(entry.name));
+  if (candidates.length !== 1) {
+    throw new Error("Extracted app must contain exactly one main bundle");
+  }
+
+  const targetPath = path.resolve(buildDirectory, candidates[0].name);
+  if (!pathStaysInside(buildDirectory, targetPath)) {
+    throw new Error("Extracted main bundle must stay inside the build directory");
+  }
+  assertNoSymbolicLinksInPath(targetPath, "Extracted main bundle");
+  if (!fs.lstatSync(targetPath).isFile()) {
+    throw new Error("Extracted main bundle must be a regular file");
+  }
+  const realTargetPath = fs.realpathSync(targetPath);
+  if (
+    !pathStaysInside(buildRoot, realTargetPath)
+    || !pathStaysInside(extractedRoot, realTargetPath)
+  ) {
+    throw new Error("Extracted main bundle must stay inside the extracted app root");
+  }
+  return targetPath;
+}
+
 function stagedFeatureFileMatches(installDir, entry) {
   try {
     const sourceStat = fs.lstatSync(entry.source);
@@ -81,13 +126,12 @@ function stagedFeatureFileMatches(installDir, entry) {
   }
 }
 
-function stagedMainBundleHasCompleteExternalAttachmentTransport(installDir, patchDescriptor) {
+function stagedMainBundleHasCompleteExternalAttachmentTransport(
+  extractedAppRoot,
+  patchDescriptor,
+) {
   try {
-    const { targetPath } = resolveStagedRegularFile(
-      installDir,
-      EXTERNAL_ATTACHMENT_MAIN_BUNDLE_TARGET,
-      "Linux feature staged main bundle",
-    );
+    const targetPath = resolveExtractedMainBundle(extractedAppRoot);
     const mainBundle = fs.readFileSync(targetPath, "utf8");
     let warned = false;
     const originalWarn = console.warn;
@@ -104,7 +148,7 @@ function stagedMainBundleHasCompleteExternalAttachmentTransport(installDir, patc
   }
 }
 
-function externalAttachmentFeatureState({ featuresRoot, installDir }) {
+function externalAttachmentFeatureState({ featuresRoot, installDir, extractedAppRoot }) {
   const enabled = enabledLinuxFeatureIds({ featuresRoot });
   if (!enabled.includes(EXTERNAL_ATTACHMENT_FEATURE_ID)) {
     return { enabled: false, complete: false };
@@ -112,6 +156,9 @@ function externalAttachmentFeatureState({ featuresRoot, installDir }) {
 
   if (installDir == null) {
     return { enabled: true, complete: false, reason: "install directory is unavailable" };
+  }
+  if (extractedAppRoot == null) {
+    return { enabled: true, complete: false, reason: "extracted app root is unavailable" };
   }
 
   try {
@@ -149,7 +196,9 @@ function externalAttachmentFeatureState({ featuresRoot, installDir }) {
     if (!stagedFeatureFileMatches(installDir, launcherHook)) {
       return { enabled: true, complete: false, reason: "staged launcher hook does not match the enabled feature" };
     }
-    if (!stagedMainBundleHasCompleteExternalAttachmentTransport(installDir, patchDescriptor)) {
+    if (
+      !stagedMainBundleHasCompleteExternalAttachmentTransport(extractedAppRoot, patchDescriptor)
+    ) {
       return { enabled: true, complete: false, reason: "staged main bundle lacks a complete attachment transport" };
     }
     return { enabled: true, complete: true };
@@ -166,8 +215,8 @@ function hasCompleteExternalAttachmentFeature(options) {
   return externalAttachmentFeatureState(options).complete;
 }
 
-function linuxCapabilities({ featuresRoot, installDir }) {
-  const state = externalAttachmentFeatureState({ featuresRoot, installDir });
+function linuxCapabilities({ featuresRoot, installDir, extractedAppRoot }) {
+  const state = externalAttachmentFeatureState({ featuresRoot, installDir, extractedAppRoot });
   if (state.enabled && !state.complete) {
     const error = new Error(
       `Enabled Linux feature '${EXTERNAL_ATTACHMENT_FEATURE_ID}' cannot advertise `
@@ -453,6 +502,8 @@ function linuxTargetInfo(target) {
 function buildInfo(options) {
   const repoDir = path.resolve(options.repoDir);
   const installDir = options.installDir == null ? null : path.resolve(options.installDir);
+  const extractedAppRoot =
+    options.extractedAppRoot == null ? null : path.resolve(options.extractedAppRoot);
   const dmgPath = path.resolve(options.dmgPath);
   const appDir = path.resolve(options.appDir);
   const featuresRoot = linuxFeaturesRoot({ featuresRoot: options.featuresRoot });
@@ -478,7 +529,7 @@ function buildInfo(options) {
     linuxFeatures: {
       enabled: enabledLinuxFeatureIds({ featuresRoot }),
     },
-    linuxCapabilities: linuxCapabilities({ featuresRoot, installDir }),
+    linuxCapabilities: linuxCapabilities({ featuresRoot, installDir, extractedAppRoot }),
   };
 }
 
@@ -497,12 +548,27 @@ function main() {
     installDir,
     dmgPath,
     appDir,
+    extractedAppRoot,
     electronVersion,
     appId,
     appDisplayName,
   ] = process.argv.slice(2);
-  if ([repoDir, installDir, dmgPath, appDir, electronVersion, appId, appDisplayName].some((value) => !value)) {
-    console.error("Usage: build-info.js <repo-dir> <install-dir> <dmg-path> <app-dir> <electron-version> <app-id> <app-display-name>");
+  if (
+    [
+      repoDir,
+      installDir,
+      dmgPath,
+      appDir,
+      extractedAppRoot,
+      electronVersion,
+      appId,
+      appDisplayName,
+    ].some((value) => !value)
+  ) {
+    console.error(
+      "Usage: build-info.js <repo-dir> <install-dir> <dmg-path> <app-dir> "
+        + "<extracted-app-root> <electron-version> <app-id> <app-display-name>",
+    );
     process.exit(1);
   }
   writeBuildInfo({
@@ -510,6 +576,7 @@ function main() {
     installDir,
     dmgPath,
     appDir,
+    extractedAppRoot,
     electronVersion,
     appId,
     appDisplayName,

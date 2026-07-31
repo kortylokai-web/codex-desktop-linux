@@ -744,6 +744,7 @@ test("build info advertises the external attachment capability only for a comple
     const dmgPath = path.join(tempRoot, "Codex.dmg");
     const appDir = path.join(tempRoot, "Codex.app");
     const installDir = path.join(tempRoot, "install");
+    const extractedAppRoot = path.join(tempRoot, "app-extracted");
     const featuresRoot = path.join(tempRoot, "linux-features");
     const sharedFeatureDir = path.join(featuresRoot, "shared-app-server-socket");
     const configPath = path.join(featuresRoot, "features.json");
@@ -762,7 +763,9 @@ test("build info advertises the external attachment capability only for a comple
       "launcher.d",
       "shared-app-server-socket-socket-env.sh",
     );
-    const mainBundlePath = path.join(installDir, ".vite", "build", "main.js");
+    const mainBundleDirectory = path.join(extractedAppRoot, ".vite", "build");
+    const mainBundlePath = path.join(mainBundleDirectory, "main.js");
+    const hashedMainBundlePath = path.join(mainBundleDirectory, "main--hash.js");
     const attachmentSelector =
       "if(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY===`1`){if(e.hostConfig.kind!==`local`)throw Error(`external app-server socket mode requires a local host`);if(!process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)throw Error(`external app-server socket mode requires CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET`);return new CodexLinuxExternalAppServerSocketTransport(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)}";
     const stagedMainBundleFixture = () => [
@@ -787,6 +790,7 @@ test("build info advertises the external attachment capability only for a comple
     const buildAttachmentInfoOptions = () => ({
       repoDir: tempRoot,
       installDir,
+      extractedAppRoot,
       dmgPath,
       appDir,
       electronVersion: "41.3.0",
@@ -808,7 +812,8 @@ test("build info advertises the external attachment capability only for a comple
         (entry) => entry.id === "feature:shared-app-server-socket:main-process-shared-app-server-socket",
       );
       assert.ok(descriptor);
-      fs.mkdirSync(path.dirname(mainBundlePath), { recursive: true });
+      fs.rmSync(mainBundleDirectory, { recursive: true, force: true });
+      fs.mkdirSync(mainBundleDirectory, { recursive: true });
       fs.writeFileSync(mainBundlePath, descriptor.apply(stagedMainBundleFixture()));
     };
     const assertIncompleteFeature = (label, options = buildAttachmentInfoOptions()) => {
@@ -830,11 +835,47 @@ test("build info advertises the external attachment capability only for a comple
     assert.equal(Array.isArray(completeInfo.linuxCapabilities), true);
     assert.deepEqual(completeInfo.linuxCapabilities, [capability]);
 
+    fs.renameSync(mainBundlePath, hashedMainBundlePath);
+    assert.deepEqual(capabilities(), [capability]);
+    const buildInfoShell = fs.readFileSync(path.join(__dirname, "lib", "build-info.sh"), "utf8");
+    assert.match(buildInfoShell, /"\$WORK_DIR\/app-extracted"/);
+
     fs.writeFileSync(configPath, '{"enabled":[]}\n');
     assert.deepEqual(capabilities(), []);
 
     fs.writeFileSync(configPath, '{"enabled":["unrelated-feature"]}\n');
     assert.deepEqual(capabilities(), []);
+
+    enableSharedFeature();
+    fs.rmSync(mainBundlePath);
+    assertIncompleteFeature("an absent extracted main bundle must fail build metadata generation");
+
+    enableSharedFeature();
+    fs.copyFileSync(mainBundlePath, hashedMainBundlePath);
+    assertIncompleteFeature(
+      "literal and hashed extracted main bundles must fail build metadata generation",
+    );
+
+    enableSharedFeature();
+    const firstHashedMainBundle = path.join(mainBundleDirectory, "main--one.js");
+    const secondHashedMainBundle = path.join(mainBundleDirectory, "main--two.js");
+    fs.renameSync(mainBundlePath, firstHashedMainBundle);
+    fs.copyFileSync(firstHashedMainBundle, secondHashedMainBundle);
+    assertIncompleteFeature("multiple hashed main bundles must fail build metadata generation");
+
+    enableSharedFeature();
+    const symlinkedExtractedRoot = path.join(tempRoot, "symlinked-app-extracted");
+    fs.symlinkSync(extractedAppRoot, symlinkedExtractedRoot, "dir");
+    assertIncompleteFeature(
+      "a symlinked extracted app root must fail build metadata generation",
+      { ...buildAttachmentInfoOptions(), extractedAppRoot: symlinkedExtractedRoot },
+    );
+    fs.unlinkSync(symlinkedExtractedRoot);
+
+    enableSharedFeature();
+    fs.rmSync(mainBundlePath);
+    fs.mkdirSync(mainBundlePath);
+    assertIncompleteFeature("a non-regular main bundle must fail build metadata generation");
 
     enableSharedFeature();
     fs.rmSync(readerTarget);
