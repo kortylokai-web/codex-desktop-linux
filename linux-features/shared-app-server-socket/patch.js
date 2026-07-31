@@ -24,12 +24,13 @@ function findTransportSymbols(source) {
   );
   if (webSocketMatch == null) return null;
   const [, namespace, webSocketClass, webSocketUrl] = webSocketMatch;
-  const lifecycleMatch = sshClassSource.match(
+  const [lifecycleMatch, extraLifecycleMatch] = sshClassSource.matchAll(
     new RegExp(
-      `return ${namespace}\\.(${IDENT})\\((${IDENT}),\\{onPongTimeout:[\\s\\S]{0,160}?\\}\\),new ${namespace}\\.(${IDENT})\\(\\2\\)`,
+      `return ${namespace}\\.(${IDENT})\\((${IDENT}),\\{onPongTimeout:[\\s\\S]{0,160}?\\}\\),(?:this\\.hasConnected=!0,)?new ${namespace}\\.(${IDENT})\\(\\2\\)(?=\\})`,
+      "g",
     ),
   );
-  if (lifecycleMatch == null) return null;
+  if (lifecycleMatch == null || extraLifecycleMatch != null) return null;
 
   return {
     namespace,

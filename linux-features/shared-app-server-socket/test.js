@@ -979,6 +979,71 @@ test("descriptor reader and hook contain no app-server lifecycle primitives", ()
   }
 });
 
+test("patch accepts each exact supported SSH transport lifecycle once", async (t) => {
+  const directLifecycle =
+    "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),new n.Rn(r)";
+  for (const [name, lifecycle] of [
+    ["direct adapter construction", directLifecycle],
+    [
+      "official connected-state assignment",
+      "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.hasConnected=!0,new n.Rn(r)",
+    ],
+  ]) {
+    await t.test(name, () => {
+      const source = syntheticBundle().replace(directLifecycle, lifecycle);
+      const patched = applySharedAppServerSocketPatch(source);
+
+      assert.notEqual(patched, source);
+      assert.equal(patched.split(expectedPatchSentinel).length - 1, 1);
+      assert.equal(applySharedAppServerSocketPatch(patched), patched);
+    });
+  }
+});
+
+test("patch rejects ambiguous or malformed SSH transport lifecycles", async (t) => {
+  const directLifecycle =
+    "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),new n.Rn(r)";
+  const connectedLifecycle =
+    "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.hasConnected=!0,new n.Rn(r)";
+  const connectedSource = syntheticBundle().replace(directLifecycle, connectedLifecycle);
+  const cases = {
+    "arbitrary intervening expression": syntheticBundle().replace(
+      directLifecycle,
+      "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.other=!0,new n.Rn(r)",
+    ),
+    "duplicate lifecycle candidates": connectedSource.replace(
+      "new n.Rn(r)}};",
+      "new n.Rn(r)}duplicate(){return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.hasConnected=!0,new n.Rn(r)}};",
+    ),
+    "different adapter socket binding": syntheticBundle().replace(
+      directLifecycle,
+      "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),new n.Rn(t)",
+    ),
+    "different adapter namespace": syntheticBundle().replace(
+      directLifecycle,
+      "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),new o.Rn(r)",
+    ),
+    "trailing adapter suffix": syntheticBundle().replace(
+      directLifecycle,
+      `${directLifecycle}.unexpected()`,
+    ),
+  };
+
+  for (const [name, source] of Object.entries(cases)) {
+    await t.test(name, () => {
+      const warnings = [];
+      const originalWarn = console.warn;
+      console.warn = (...args) => warnings.push(args.join(" "));
+      try {
+        assert.equal(applySharedAppServerSocketPatch(source), source);
+      } finally {
+        console.warn = originalWarn;
+      }
+      assert.match(warnings.join("\n"), /SSH WebSocket transport/);
+    });
+  }
+});
+
 test("patch selects the bridge only for the local host and is idempotent", () => {
   const source = syntheticBundle();
   const patched = applySharedAppServerSocketPatch(source);
