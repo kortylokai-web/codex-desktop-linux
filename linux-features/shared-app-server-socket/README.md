@@ -54,17 +54,24 @@ ordinary startup then continues unattached.
 
 Explicit launch environment values take precedence over the descriptor. Their
 presence bypasses descriptor selection entirely, preserving development and
-operator-controlled routing.
+operator-controlled routing. Setting
+`CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY=1` together with
+`CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET` selects the same external, no-authority
+lifecycle as the descriptor. Setting only
+`CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET` selects the current environment-selected,
+Desktop-owned authority mode: Desktop starts and stops the authority, owns its
+socket and lock, reclaims stale owned paths, and unlinks paths it owns.
 
 After enabling or changing this feature, perform a full application restart so
 the launcher hook and selected transport are recreated.
 
 ## Lifecycle boundary
 
-This feature only selects an external Unix socket. It never starts, stops,
-restarts, reclaims, unlinks, replaces, probes, or otherwise manages the
-external app-server, its socket, or any lock. The external supervisor remains
-the sole owner of that lifecycle.
+The no-authority lifecycle guarantee applies only to descriptor-selected mode
+and explicit attach-only mode with both environment values. In those modes, the
+feature never starts, stops, restarts, reclaims, unlinks, replaces, probes, or
+otherwise manages the external app-server, its socket, or any lock. The
+external supervisor remains the sole owner of that lifecycle.
 
 ## Enabling and validation
 
