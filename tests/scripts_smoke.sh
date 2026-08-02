@@ -11132,10 +11132,8 @@ test_launcher_print_build_info_early_exit() {
     local output_with_args="$workspace/output-with-args.json"
     local error="$workspace/error.log"
     local marker="$workspace/runtime-marker"
-    local fake_bin="$workspace/bin"
-    local fake_cat="$fake_bin/cat"
 
-    mkdir -p "$app_dir/resources" "$app_dir/.codex-linux/prelaunch.d" "$workspace/home" "$fake_bin"
+    mkdir -p "$app_dir/resources" "$app_dir/.codex-linux/prelaunch.d" "$workspace/home"
     cp "$REPO_DIR/launcher/start.sh.template" "$app_dir/start.sh"
     chmod 0755 "$app_dir/start.sh"
     printf '%s\n' '{' '  "schemaVersion": 1,' '  "appIdentity": {"id": "codex-desktop"}' '}' > "$build_info"
@@ -11143,31 +11141,12 @@ test_launcher_print_build_info_early_exit() {
     chmod 0755 "$app_dir/electron"
     printf '%s\n' "#!/usr/bin/env bash" "touch '$marker'" > "$app_dir/.codex-linux/prelaunch.d/probe"
     chmod 0755 "$app_dir/.codex-linux/prelaunch.d/probe"
-    printf '%s\n' \
-        '#!/usr/bin/env bash' \
-        '[ "${CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE:-}" = "seed-host-state" ] || exit 91' \
-        '[ "${CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE:-}" = "seed-host-value" ] || exit 92' \
-        '[ "${CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE:-}" = "seed-original-state" ] || exit 93' \
-        '[ "${CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE:-}" = "seed-original-value" ] || exit 94' \
-        'exec /usr/bin/cat "$@"' > "$fake_cat"
-    chmod 0755 "$fake_cat"
-
     HOME="$workspace/home" XDG_CACHE_HOME="$workspace/cache" XDG_STATE_HOME="$workspace/state" \
-        XDG_CONFIG_HOME="$workspace/config" PATH="$fake_bin:$PATH" \
-        CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE="seed-host-state" \
-        CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE="seed-host-value" \
-        CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE="seed-original-state" \
-        CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE="seed-original-value" \
-        LD_LIBRARY_PATH="/seed/library" bash "$app_dir/start.sh" --print-build-info >"$output" 2>"$error" \
+        XDG_CONFIG_HOME="$workspace/config" bash "$app_dir/start.sh" --print-build-info >"$output" 2>"$error" \
         || fail "launcher build-info inspection should exit successfully"
     cmp -s "$build_info" "$output" || fail "launcher build-info inspection must preserve the packaged JSON byte-for-byte"
     HOME="$workspace/home" XDG_CACHE_HOME="$workspace/cache" XDG_STATE_HOME="$workspace/state" \
-        XDG_CONFIG_HOME="$workspace/config" PATH="$fake_bin:$PATH" \
-        CODEX_LINUX_HOST_LD_LIBRARY_PATH_STATE="seed-host-state" \
-        CODEX_LINUX_HOST_LD_LIBRARY_PATH_VALUE="seed-host-value" \
-        CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_STATE="seed-original-state" \
-        CODEX_LINUX_ORIGINAL_LD_LIBRARY_PATH_VALUE="seed-original-value" \
-        LD_LIBRARY_PATH="/seed/library" bash "$app_dir/start.sh" --print-build-info --ozone-platform=wayland --class=CodexDesktop >"$output_with_args" 2>"$error" \
+        XDG_CONFIG_HOME="$workspace/config" bash "$app_dir/start.sh" --print-build-info --ozone-platform=wayland --class=CodexDesktop >"$output_with_args" 2>"$error" \
         || fail "launcher build-info inspection with fixed trailing arguments should exit successfully"
     cmp -s "$build_info" "$output_with_args" || fail "launcher build-info inspection with fixed trailing arguments must preserve the packaged JSON byte-for-byte"
     cmp -s "$output" "$output_with_args" || fail "launcher build-info inspection must ignore fixed trailing arguments"

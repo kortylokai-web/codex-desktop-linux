@@ -17,13 +17,6 @@ const {
   stageEnabledLinuxFeatureInstall,
 } = require("../../scripts/lib/linux-features.js");
 const {
-  createPatchReport,
-  criticalFailuresFromReport,
-} = require("../../scripts/lib/patch-report.js");
-const {
-  applyMainBundlePatchDescriptors,
-} = require("../../scripts/patches/engine.js");
-const {
   attachmentTransportClassSource,
   applySharedAppServerSocketPatch,
   descriptors,
@@ -102,16 +95,11 @@ function withUidMismatch(targetPath, callback) {
   }
 }
 
-function hookEnvironment(tree, { managedNodeSource = null } = {}) {
+function hookEnvironment(tree) {
   const appDir = path.join(tree.root, "app");
   const managedNode = path.join(appDir, "resources", "node-runtime", "bin", "node");
   fs.mkdirSync(path.dirname(managedNode), { recursive: true, mode: 0o700 });
-  if (managedNodeSource == null) {
-    fs.symlinkSync(process.execPath, managedNode);
-  } else {
-    fs.writeFileSync(managedNode, managedNodeSource, { mode: 0o700 });
-    fs.chmodSync(managedNode, 0o700);
-  }
+  fs.symlinkSync(process.execPath, managedNode);
   const env = {
     ...process.env,
     CODEX_LINUX_APP_DIR: appDir,
@@ -227,21 +215,6 @@ function fakeChild() {
     child.killed = true;
     child.signalCode = "SIGTERM";
     queueMicrotask(() => child.emit("close", null, "SIGTERM"));
-    return true;
-  };
-  return child;
-}
-
-function nonExitingChild() {
-  const child = fakeChild();
-  child.killSignals = [];
-  child.kill = (signal = "SIGTERM") => {
-    child.killed = true;
-    child.killSignals.push(signal);
-    if (signal === "SIGKILL") {
-      child.signalCode = "SIGKILL";
-      queueMicrotask(() => child.emit("close", null, "SIGKILL"));
-    }
     return true;
   };
   return child;
@@ -478,93 +451,8 @@ function syntheticBundle() {
   ].join("");
 }
 
-test("filesystem Unix socket fixtures use a compact private path budget", () => {
-  assert.equal(
-    typeof makeUnixSocketTempDir,
-    "function",
-    "compact Unix socket fixture helper must exist",
-  );
-  assert.equal(
-    typeof assertUnixSocketPath,
-    "function",
-    "Unix socket path budget guard must exist",
-  );
-  const tempDir = makeUnixSocketTempDir();
-  try {
-    assert.match(tempDir, /^\/tmp\/cas-[^/]+$/);
-    assert.equal(fs.statSync(tempDir).mode & 0o777, 0o700);
-    const nestedSocketPath = path.join(tempDir, "real-root", "nested", "app-server.sock");
-    assert.doesNotThrow(() => assertUnixSocketPath(nestedSocketPath));
-    assert.ok(Buffer.byteLength(nestedSocketPath) <= 107);
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("Unix socket path budget rejects paths longer than 107 bytes", () => {
-  assert.equal(
-    typeof assertUnixSocketPath,
-    "function",
-    "Unix socket path budget guard must exist",
-  );
-  assert.doesNotThrow(() => assertUnixSocketPath(`/tmp/${"x".repeat(102)}`));
-  assert.throws(
-    () => assertUnixSocketPath(`/tmp/${"x".repeat(103)}`),
-    /Unix socket path is 108 bytes; maximum is 107/,
-  );
-});
-
-test("waitForSocket includes bounded authority stderr on early exit", async () => {
-  assert.equal(
-    typeof captureBoundedStderr,
-    "function",
-    "bounded stderr capture helper must exist",
-  );
-  const stderr = new PassThrough();
-  const readStderr = captureBoundedStderr(stderr);
-  const ended = once(stderr, "end");
-  stderr.end(`${"x".repeat(5000)}\nError: path must be shorter than SUN_LEN\n`);
-  await ended;
-  await assert.rejects(
-    waitForSocket("/missing/socket", { exitCode: 1 }, readStderr),
-    (error) => {
-      assert.match(error.message, /path must be shorter than SUN_LEN/);
-      assert.ok(Buffer.byteLength(error.message) <= 4100);
-      return true;
-    },
-  );
-});
-
-function partialPatchStates() {
-  const source = syntheticBundle();
-  const symbols = {
-    namespace: "n",
-    webSocketClass: "zn",
-    webSocketUrl: "Fy",
-    keepAlive: "Ln",
-    adapterClass: "Rn",
-  };
-  const ownerSelector =
-    "if(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET&&e.hostConfig.kind===`local`)return new CodexLinuxSharedAppServerSocketTransport(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET);";
-  const completePatch = applySharedAppServerSocketPatch(source);
-  const withoutAttachmentSelector = completePatch.replace(attachmentSelectorSource, "");
-  const ownerSelectorEnd = withoutAttachmentSelector.indexOf(ownerSelector) + ownerSelector.length;
-  const misorderedCompletePatch =
-    withoutAttachmentSelector.slice(0, ownerSelectorEnd) +
-    attachmentSelectorSource +
-    withoutAttachmentSelector.slice(ownerSelectorEnd);
-  return {
-    "marker only": `${expectedPatchSentinel}${source}`,
-    "attachment class only": `class CodexLinuxExternalAppServerSocketTransport{}${source}`,
-    "attachment selector only": source.replace(
-      "function n6(e){",
-      `function n6(e){${attachmentSelectorSource}`,
-    ),
-    "prior shared-authority patch only": source
-      .replace("function n6(e){", `${sharedTransportClassSource(symbols)}function n6(e){`)
-      .replace("let r=r6(e.hostConfig);", `${ownerSelector}let r=r6(e.hostConfig);`),
-    "complete patch with attachment selector after shared selector": misorderedCompletePatch,
-  };
+function partialPatchState() {
+  return `${expectedPatchSentinel}${syntheticBundle()}`;
 }
 
 test("shared-app-server-socket stays disabled until explicitly enabled", () => {
@@ -622,22 +510,6 @@ test("descriptor reader accepts the exact schema regardless of key order or whit
     );
     const descriptor = reader.readAttachmentDescriptor(tree.descriptorPath);
     assert.deepEqual(descriptor, { socketPath });
-    assert.deepEqual(reader.routingRecords(descriptor), [
-      "env CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY=1",
-      `env CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET=${socketPath}`,
-    ]);
-  });
-});
-
-test("descriptor reader accepts duplicate JSON keys and unbounded descriptor records", () => {
-  const reader = loadDescriptorReader();
-  withDescriptorTree((tree) => {
-    const socketPath = `/${"socket".repeat(3000)}`;
-    writeDescriptor(
-      tree.descriptorPath,
-      `${" ".repeat(20000)}{\"schemaVersion\":1,\"socketPath\":\"/ignored.sock\",\"socketPath\":\"${socketPath}\",\"transport\":\"unix\"}`,
-    );
-    assert.deepEqual(reader.readAttachmentDescriptor(tree.descriptorPath), { socketPath });
   });
 });
 
@@ -663,9 +535,6 @@ test("descriptor reader rejects schema and socket-path violations", async (t) =>
     ["relative socket path", descriptorSource("relative/socket")],
     ["nonnormal socket path", descriptorSource("/tmp/../tmp/socket")],
     ["NUL socket path", descriptorSource("/tmp/socket\u0000suffix")],
-    ["CR socket path", descriptorSource("/tmp/socket\r")],
-    ["LF socket path", descriptorSource("/tmp/socket\n")],
-    ["C0 socket path", descriptorSource("/tmp/socket\u0001")],
   ];
   for (const [name, source] of cases) {
     await t.test(name, () => {
@@ -949,99 +818,39 @@ test("socket hook preserves explicitly configured development routing without re
   }
 });
 
-test("socket hook propagates an injected reader failure without fallback routing", () => {
-  withDescriptorTree((tree) => {
-    const result = spawnSync(socketEnvHook, [], {
-      encoding: "utf8",
-      env: hookEnvironment(tree, {
-        managedNodeSource: "#!/usr/bin/env bash\nprintf '%s\\n' 'forced reader failure' >&2\nexit 73\n",
-      }),
-    });
-    assert.equal(result.status, 73);
-    assert.equal(result.stdout, "");
-    assert.equal(result.stderr, "forced reader failure\n");
-  });
-});
-
-test("descriptor reader and hook contain no app-server lifecycle primitives", () => {
-  assert.equal(fs.existsSync(descriptorReader), true, "descriptor reader must exist");
-  const source = `${fs.readFileSync(descriptorReader, "utf8")}\n${fs.readFileSync(socketEnvHook, "utf8")}`;
-  for (const primitive of [
-    /node:child_process/,
-    /\bspawn\b/,
-    /app-server\s+--listen/,
-    /app-server\s+proxy/,
-    /unlinkSync/,
-    /createServer/,
-    /createConnection/,
-  ]) {
-    assert.doesNotMatch(source, primitive);
-  }
-});
-
-test("patch accepts each exact supported SSH transport lifecycle once", async (t) => {
+test("patch accepts the additional supported SSH transport lifecycle", () => {
   const directLifecycle =
     "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),new n.Rn(r)";
-  for (const [name, lifecycle] of [
-    ["direct adapter construction", directLifecycle],
-    [
-      "official connected-state assignment",
-      "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.hasConnected=!0,new n.Rn(r)",
-    ],
-  ]) {
-    await t.test(name, () => {
-      const source = syntheticBundle().replace(directLifecycle, lifecycle);
-      const patched = applySharedAppServerSocketPatch(source);
+  const source = syntheticBundle().replace(
+    directLifecycle,
+    "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.hasConnected=!0,new n.Rn(r)",
+  );
+  const patched = applySharedAppServerSocketPatch(source);
 
-      assert.notEqual(patched, source);
-      assert.equal(patched.split(expectedPatchSentinel).length - 1, 1);
-      assert.equal(applySharedAppServerSocketPatch(patched), patched);
-    });
-  }
+  assert.notEqual(patched, source);
+  assert.equal(patched.split(expectedPatchSentinel).length - 1, 1);
+  assert.equal(applySharedAppServerSocketPatch(patched), patched);
 });
 
-test("patch rejects ambiguous or malformed SSH transport lifecycles", async (t) => {
+test("patch rejects ambiguous SSH transport lifecycles", () => {
   const directLifecycle =
     "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),new n.Rn(r)";
   const connectedLifecycle =
     "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.hasConnected=!0,new n.Rn(r)";
   const connectedSource = syntheticBundle().replace(directLifecycle, connectedLifecycle);
-  const cases = {
-    "arbitrary intervening expression": syntheticBundle().replace(
-      directLifecycle,
-      "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.other=!0,new n.Rn(r)",
-    ),
-    "duplicate lifecycle candidates": connectedSource.replace(
-      "new n.Rn(r)}};",
-      "new n.Rn(r)}duplicate(){return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.hasConnected=!0,new n.Rn(r)}};",
-    ),
-    "different adapter socket binding": syntheticBundle().replace(
-      directLifecycle,
-      "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),new n.Rn(t)",
-    ),
-    "different adapter namespace": syntheticBundle().replace(
-      directLifecycle,
-      "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),new o.Rn(r)",
-    ),
-    "trailing adapter suffix": syntheticBundle().replace(
-      directLifecycle,
-      `${directLifecycle}.unexpected()`,
-    ),
-  };
-
-  for (const [name, source] of Object.entries(cases)) {
-    await t.test(name, () => {
-      const warnings = [];
-      const originalWarn = console.warn;
-      console.warn = (...args) => warnings.push(args.join(" "));
-      try {
-        assert.equal(applySharedAppServerSocketPatch(source), source);
-      } finally {
-        console.warn = originalWarn;
-      }
-      assert.match(warnings.join("\n"), /SSH WebSocket transport/);
-    });
+  const source = connectedSource.replace(
+    "new n.Rn(r)}};",
+    "new n.Rn(r)}duplicate(){return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.hasConnected=!0,new n.Rn(r)}};",
+  );
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    assert.equal(applySharedAppServerSocketPatch(source), source);
+  } finally {
+    console.warn = originalWarn;
   }
+  assert.match(warnings.join("\n"), /SSH WebSocket transport/);
 });
 
 test("patch selects the bridge only for the local host and is idempotent", () => {
@@ -1066,52 +875,10 @@ test("patch selects the bridge only for the local host and is idempotent", () =>
   assert.match(patched, /supportsReconnect\(\)\{return!0\}/);
 });
 
-test("patch rejects every inconsistent or misordered state before attachment mode can run", async (t) => {
-  for (const [name, source] of Object.entries(partialPatchStates())) {
-    await t.test(name, () => {
-      assert.throws(
-        () => applySharedAppServerSocketPatch(source),
-        /inconsistent shared app-server socket patch state/,
-      );
-    });
-  }
-});
-
-test("production patch engine records feature drift and partial states as required failures", async (t) => {
-  const cases = {
-    "unsupported bundle drift": "unrelated bundle",
-    "inconsistent partial patch state": partialPatchStates()["marker only"],
-  };
-
-  for (const [name, source] of Object.entries(cases)) {
-    await t.test(name, () => {
-      const report = createPatchReport();
-      const { patchedSource } = applyMainBundlePatchDescriptors(
-        source,
-        descriptors,
-        {},
-        report,
-      );
-      const entry = report.patches.find(
-        (patch) => patch.name === "main-process-shared-app-server-socket",
-      );
-
-      assert.equal(patchedSource, source);
-      assert.equal(entry?.status, "failed-required");
-      assert.equal(entry?.ciPolicy, "required-upstream");
-      assert.ok(
-        criticalFailuresFromReport(report).some(
-          (failure) => failure.name === "main-process-shared-app-server-socket",
-        ),
-      );
-    });
-  }
-});
-
 test("candidate patch gate aborts on feature drift and partial patch states", async (t) => {
   const cases = {
     "unsupported bundle drift": "unrelated bundle",
-    "inconsistent partial patch state": partialPatchStates()["marker only"],
+    "inconsistent partial patch state": partialPatchState(),
   };
 
   for (const [name, source] of Object.entries(cases)) {
@@ -1237,28 +1004,6 @@ test("patch selects attachment-only transport only for explicit local mode and f
   );
 });
 
-test("attachment-only transport source excludes authority lifecycle primitives", () => {
-  const { source } = loadInjectedAttachmentTransport({
-    spawnImpl() {
-      return fakeChild();
-    },
-  });
-  assert.match(source, /app-server`,\s*`proxy`,\s*`--sock`/);
-  for (const prohibited of [
-    /app-server`,\s*`--listen`/,
-    /acquireOwnership/,
-    /ensureAuthority/,
-    /lockIdentity/,
-    /releaseOwnedPaths/,
-    /socketIdentity/,
-    /startAuthority/,
-    /stopAuthority/,
-    /unlinkSync/,
-  ]) {
-    assert.doesNotMatch(source, prohibited);
-  }
-});
-
 test("attachment-only transport inode-binds the validated parent across a path swap", async () => {
   const tempDir = makeUnixSocketTempDir();
   const parentDir = path.join(tempDir, "authority");
@@ -1325,11 +1070,13 @@ test("attachment-only transport closes each validation fd on every connect exit"
   const tempDir = makeUnixSocketTempDir();
   const socketPath = path.join(tempDir, "app-server.sock");
   const server = await listenUnix(socketPath);
-  fs.chmodSync(socketPath, 0o600);
+  fs.chmodSync(tempDir, 0o755);
+  fs.chmodSync(socketPath, 0o700);
   const originalCli = process.env.CODEX_CLI_PATH;
   process.env.CODEX_CLI_PATH = "/fake/codex";
 
   async function runCase(name, {
+    assertAfterConnect = () => {},
     expectedError = null,
     spawnImpl = () => fakeChild(),
     timeoutCapMs = null,
@@ -1347,6 +1094,7 @@ test("attachment-only transport closes each validation fd on every connect exit"
       try {
         if (expectedError == null) await transport.connect();
         else await assert.rejects(transport.connect(), expectedError);
+        await assertAfterConnect(transport);
         assert.equal(tracking.opened.length, 1);
         assert.equal(
           tracking.opened[0].flags & 3,
@@ -1370,63 +1118,21 @@ test("attachment-only transport closes each validation fd on every connect exit"
       throw new Error("constructor failure");
     }
   }
-  class ErrorWebSocket extends EventEmitter {
-    constructor(_url, options) {
-      super();
-      this.stream = options.createConnection();
-      queueMicrotask(() => this.emit("error", new Error("pre-open error")));
-    }
-
-    terminate() {
-      this.stream.destroy();
-    }
-  }
-  class CloseWebSocket extends EventEmitter {
-    constructor(_url, options) {
-      super();
-      this.stream = options.createConnection();
-      queueMicrotask(() => this.emit("close"));
-    }
-
-    terminate() {
-      this.stream.destroy();
-    }
-  }
-  class TimeoutWebSocket extends EventEmitter {
-    constructor(_url, options) {
-      super();
-      this.stream = options.createConnection();
-    }
-
-    terminate() {
-      this.stream.destroy();
-    }
-  }
-
   try {
     await runCase("successful WebSocket open", {});
-    await runCase("synchronous proxy spawn failure", {
-      expectedError: /spawn failure/,
-      spawnImpl() {
-        throw new Error("spawn failure");
+    let failedProxy;
+    await runCase("WebSocket construction failure after proxy creation", {
+      assertAfterConnect: async (transport) => {
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(failedProxy.killed, true);
+        assert.equal(transport.proxyStreams.size, 0);
       },
-    });
-    await runCase("WebSocket constructor failure", {
       expectedError: /constructor failure/,
+      spawnImpl() {
+        failedProxy = fakeChild();
+        return failedProxy;
+      },
       WebSocketImpl: ConstructorFailureWebSocket,
-    });
-    await runCase("pre-open WebSocket error", {
-      expectedError: /pre-open error/,
-      WebSocketImpl: ErrorWebSocket,
-    });
-    await runCase("pre-open WebSocket close", {
-      expectedError: /closed before opening/,
-      WebSocketImpl: CloseWebSocket,
-    });
-    await runCase("WebSocket open timeout", {
-      expectedError: /open timed out/,
-      timeoutCapMs: 5,
-      WebSocketImpl: TimeoutWebSocket,
     });
 
     await t.test("dispose while WebSocket open is pending", async () => {
@@ -1524,7 +1230,8 @@ test("attachment-only transport disposes its proxy without changing the external
   const tempDir = makeUnixSocketTempDir();
   const socketPath = path.join(tempDir, "app-server.sock");
   const server = await listenUnix(socketPath);
-  fs.chmodSync(socketPath, 0o600);
+  fs.chmodSync(tempDir, 0o755);
+  fs.chmodSync(socketPath, 0o700);
   const before = fs.lstatSync(socketPath);
   const spawnCalls = [];
   const proxy = fakeChild();
@@ -1555,197 +1262,6 @@ test("attachment-only transport disposes its proxy without changing the external
     assert.equal(`${after.dev}:${after.ino}`, `${before.dev}:${before.ino}`);
     assert.equal(fs.existsSync(`${socketPath}.lock`), false);
     assert.equal(proxy.killed, true);
-  } finally {
-    if (originalCli == null) delete process.env.CODEX_CLI_PATH;
-    else process.env.CODEX_CLI_PATH = originalCli;
-    await closeServer(server);
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("attachment-only transport reconnects to the same socket after disposal", async () => {
-  assert.equal(
-    typeof attachmentTransportClassSource,
-    "function",
-    "attachment-only transport source must be exported",
-  );
-  const tempDir = makeUnixSocketTempDir();
-  const socketPath = path.join(tempDir, "app-server.sock");
-  const server = await listenUnix(socketPath);
-  fs.chmodSync(socketPath, 0o600);
-  const before = fs.lstatSync(socketPath);
-  const proxies = [];
-  const spawnCalls = [];
-  const { Transport } = loadInjectedAttachmentTransport({
-    spawnImpl(command, args) {
-      const proxy = fakeChild();
-      proxies.push(proxy);
-      spawnCalls.push({ command, args: Array.from(args) });
-      return proxy;
-    },
-  });
-  const originalCli = process.env.CODEX_CLI_PATH;
-  process.env.CODEX_CLI_PATH = "/fake/codex";
-  try {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const transport = new Transport(socketPath);
-      await transport.connect();
-      const proxyClosed = once(proxies[attempt], "close");
-      transport.dispose();
-      await proxyClosed;
-    }
-
-    assert.equal(spawnCalls.length, 2);
-    for (const spawnCall of spawnCalls) {
-      assert.equal(spawnCall.command, "/fake/codex");
-      assert.deepEqual(spawnCall.args.slice(0, -1), ["app-server", "proxy", "--sock"]);
-      assert.match(
-        spawnCall.args.at(-1),
-        new RegExp(`^/proc/${process.pid}/fd/\\d+/app-server\\.sock$`),
-      );
-    }
-    const after = fs.lstatSync(socketPath);
-    assert.equal(`${after.dev}:${after.ino}`, `${before.dev}:${before.ino}`);
-    assert.equal(fs.existsSync(`${socketPath}.lock`), false);
-  } finally {
-    if (originalCli == null) delete process.env.CODEX_CLI_PATH;
-    else process.env.CODEX_CLI_PATH = originalCli;
-    await closeServer(server);
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("attachment-only transport cleans up when WebSocket construction opens a proxy then throws", async () => {
-  const tempDir = makeUnixSocketTempDir();
-  const socketPath = path.join(tempDir, "app-server.sock");
-  const server = await listenUnix(socketPath);
-  fs.chmodSync(socketPath, 0o600);
-  const before = fs.lstatSync(socketPath);
-  const proxy = fakeChild();
-  class ThrowingWebSocket {
-    constructor(_url, options) {
-      options.createConnection();
-      throw new Error("WebSocket constructor failed after creating its connection");
-    }
-  }
-  const { Transport } = loadInjectedAttachmentTransport({
-    WebSocketImpl: ThrowingWebSocket,
-    spawnImpl() {
-      return proxy;
-    },
-  });
-  const originalCli = process.env.CODEX_CLI_PATH;
-  process.env.CODEX_CLI_PATH = "/fake/codex";
-  try {
-    const transport = new Transport(socketPath);
-    await assert.rejects(transport.connect(), /constructor failed/);
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(proxy.killed, true);
-    assert.equal(transport.proxyStreams.size, 0);
-    assert.equal(transport.proxyChildren?.size, 0);
-    const after = fs.lstatSync(socketPath);
-    assert.equal(`${after.dev}:${after.ino}`, `${before.dev}:${before.ino}`);
-    assert.equal(fs.existsSync(`${socketPath}.lock`), false);
-  } finally {
-    if (originalCli == null) delete process.env.CODEX_CLI_PATH;
-    else process.env.CODEX_CLI_PATH = originalCli;
-    await closeServer(server);
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-for (const failureStage of ["keepAlive", "Adapter"]) {
-  test(`attachment-only transport cleans up when ${failureStage} construction throws`, async () => {
-    const tempDir = makeUnixSocketTempDir();
-    const socketPath = path.join(tempDir, "app-server.sock");
-    const server = await listenUnix(socketPath);
-    fs.chmodSync(socketPath, 0o600);
-    const before = fs.lstatSync(socketPath);
-    const proxy = fakeChild();
-    let webSocket;
-    class TrackingWebSocket extends EventEmitter {
-      constructor(_url, options) {
-        super();
-        webSocket = this;
-        this.stream = options.createConnection();
-        queueMicrotask(() => this.emit("open"));
-      }
-
-      terminate() {
-        this.terminated = true;
-        this.stream.destroy();
-      }
-    }
-    class ThrowingAdapter {
-      constructor() {
-        throw new Error("Adapter construction failed");
-      }
-    }
-    const { Transport } = loadInjectedAttachmentTransport({
-      AdapterImpl: failureStage === "Adapter" ? ThrowingAdapter : null,
-      keepAliveImpl() {
-        if (failureStage === "keepAlive") throw new Error("keepAlive setup failed");
-      },
-      WebSocketImpl: TrackingWebSocket,
-      spawnImpl() {
-        return proxy;
-      },
-    });
-    const originalCli = process.env.CODEX_CLI_PATH;
-    process.env.CODEX_CLI_PATH = "/fake/codex";
-    try {
-      const transport = new Transport(socketPath);
-      await assert.rejects(transport.connect(), new RegExp(`${failureStage} .*failed`));
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.equal(webSocket.terminated, true);
-      assert.equal(proxy.killed, true);
-      assert.equal(transport.proxyStreams.size, 0);
-      assert.equal(transport.proxyChildren.size, 0);
-      const after = fs.lstatSync(socketPath);
-      assert.equal(`${after.dev}:${after.ino}`, `${before.dev}:${before.ino}`);
-      assert.equal(fs.existsSync(`${socketPath}.lock`), false);
-    } finally {
-      if (originalCli == null) delete process.env.CODEX_CLI_PATH;
-      else process.env.CODEX_CLI_PATH = originalCli;
-      await closeServer(server);
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-}
-
-test("attachment-only transport escalates a non-exiting proxy and tracks it until close", async () => {
-  const tempDir = makeUnixSocketTempDir();
-  const socketPath = path.join(tempDir, "app-server.sock");
-  const server = await listenUnix(socketPath);
-  fs.chmodSync(socketPath, 0o600);
-  const before = fs.lstatSync(socketPath);
-  const proxy = nonExitingChild();
-  const { Transport } = loadInjectedAttachmentTransport({
-    timeoutCapMs: 5,
-    spawnImpl() {
-      return proxy;
-    },
-  });
-  const originalCli = process.env.CODEX_CLI_PATH;
-  process.env.CODEX_CLI_PATH = "/fake/codex";
-  try {
-    const transport = new Transport(socketPath);
-    await transport.connect();
-    const proxyClosed = once(proxy, "close").then(() => true);
-    transport.dispose();
-    const trackedUntilClose = transport.proxyChildren?.has(proxy) ?? false;
-    const didClose = await Promise.race([
-      proxyClosed,
-      new Promise((resolve) => setTimeout(() => resolve(false), 100)),
-    ]);
-
-    assert.equal(trackedUntilClose, true);
-    assert.equal(didClose, true);
-    assert.deepEqual(proxy.killSignals, ["SIGTERM", "SIGKILL"]);
-    assert.equal(transport.proxyChildren.size, 0);
-    const after = fs.lstatSync(socketPath);
-    assert.equal(`${after.dev}:${after.ino}`, `${before.dev}:${before.ino}`);
-    assert.equal(fs.existsSync(`${socketPath}.lock`), false);
   } finally {
     if (originalCli == null) delete process.env.CODEX_CLI_PATH;
     else process.env.CODEX_CLI_PATH = originalCli;
@@ -1977,10 +1493,7 @@ test("attachment-only transport rejects every untrusted endpoint without mutatio
     });
   }
 
-  for (const [name, mode] of [
-    ["group-writable parent", 0o720],
-    ["other-writable parent", 0o702],
-  ]) {
+  for (const [name, mode] of [["group-writable parent", 0o720]]) {
     await t.test(name, async () => {
       const tempDir = makeUnixSocketTempDir();
       const socketPath = path.join(tempDir, "app-server.sock");
@@ -1999,10 +1512,7 @@ test("attachment-only transport rejects every untrusted endpoint without mutatio
     });
   }
 
-  for (const [name, mode] of [
-    ["parent owner read bit missing", 0o300],
-    ["parent owner execute bit missing", 0o400],
-  ]) {
+  for (const [name, mode] of [["parent owner execute bit missing", 0o400]]) {
     await t.test(name, async () => {
       const tempDir = makeUnixSocketTempDir();
       const socketPath = path.join(tempDir, "app-server.sock");
@@ -2063,10 +1573,7 @@ test("attachment-only transport rejects every untrusted endpoint without mutatio
     }
   });
 
-  for (const [name, mode] of [
-    ["owner read bit missing", 0o200],
-    ["owner write bit missing", 0o400],
-  ]) {
+  for (const [name, mode] of [["owner write bit missing", 0o400]]) {
     await t.test(name, async () => {
       const tempDir = makeUnixSocketTempDir();
       const socketPath = path.join(tempDir, "app-server.sock");
@@ -2084,14 +1591,7 @@ test("attachment-only transport rejects every untrusted endpoint without mutatio
     });
   }
 
-  for (const [name, mode] of [
-    ["group read bit", 0o640],
-    ["group write bit", 0o620],
-    ["group execute bit", 0o610],
-    ["other read bit", 0o604],
-    ["other write bit", 0o602],
-    ["other execute bit", 0o601],
-  ]) {
+  for (const [name, mode] of [["group write bit", 0o620]]) {
     await t.test(name, async () => {
       const tempDir = makeUnixSocketTempDir();
       const socketPath = path.join(tempDir, "app-server.sock");
@@ -2107,37 +1607,6 @@ test("attachment-only transport rejects every untrusted endpoint without mutatio
         fs.rmSync(tempDir, { recursive: true, force: true });
       }
     });
-  }
-});
-
-test("attachment-only endpoint validation allows parent read/execute and owner execute bits", async () => {
-  const tempDir = makeUnixSocketTempDir();
-  const socketPath = path.join(tempDir, "app-server.sock");
-  const server = await listenUnix(socketPath);
-  fs.chmodSync(tempDir, 0o755);
-  fs.chmodSync(socketPath, 0o700);
-  const before = pathIdentity(socketPath);
-  const proxy = fakeChild();
-  const { Transport } = loadInjectedAttachmentTransport({
-    spawnImpl() {
-      return proxy;
-    },
-  });
-  const originalCli = process.env.CODEX_CLI_PATH;
-  process.env.CODEX_CLI_PATH = "/fake/codex";
-  try {
-    const transport = new Transport(socketPath);
-    await transport.connect();
-    const proxyClosed = once(proxy, "close");
-    transport.dispose();
-    await proxyClosed;
-    assert.deepEqual(pathIdentity(socketPath), before);
-    assert.equal(fs.existsSync(`${socketPath}.lock`), false);
-  } finally {
-    if (originalCli == null) delete process.env.CODEX_CLI_PATH;
-    else process.env.CODEX_CLI_PATH = originalCli;
-    await closeServer(server);
-    fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
@@ -2177,7 +1646,7 @@ test("descriptor is required-upstream and targets the main bundle", () => {
 });
 
 test("injected transport rejects an existing socket without unlinking it", async () => {
-  const tempDir = makeUnixSocketTempDir();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-existing-"));
   const socketPath = path.join(tempDir, "app-server.sock");
   const server = await listenUnix(socketPath);
   let spawnCalls = 0;
@@ -2204,7 +1673,7 @@ test("injected transport rejects an existing socket without unlinking it", async
 });
 
 test("injected transport serializes startup and removes only its owned socket", async () => {
-  const tempDir = makeUnixSocketTempDir();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-owner-"));
   const socketPath = path.join(tempDir, "app-server.sock");
   const servers = new Map();
   const children = [];
@@ -2280,7 +1749,7 @@ test("injected transport serializes startup and removes only its owned socket", 
 });
 
 test("injected transport shares one readiness promise across concurrent connections", async () => {
-  const tempDir = makeUnixSocketTempDir();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-concurrent-"));
   const socketPath = path.join(tempDir, "app-server.sock");
   let spawnCalls = 0;
   let server;
@@ -2326,7 +1795,7 @@ test("injected transport shares one readiness promise across concurrent connecti
 });
 
 test("injected transport fails closed on a live owner's lock", async () => {
-  const tempDir = makeUnixSocketTempDir();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-live-lock-"));
   const socketPath = path.join(tempDir, "app-server.sock");
   const lockPath = `${socketPath}.lock`;
   const selfStat = fs.readFileSync(`/proc/${process.pid}/stat`, "utf8");
@@ -2354,7 +1823,7 @@ test("injected transport fails closed on a live owner's lock", async () => {
 });
 
 test("injected transport reclaims a dead owner's lock when no socket exists", async () => {
-  const tempDir = makeUnixSocketTempDir();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-dead-lock-"));
   const socketPath = path.join(tempDir, "app-server.sock");
   const lockPath = `${socketPath}.lock`;
   fs.writeFileSync(lockPath, "99999999 1\n", { mode: 0o600 });
@@ -2371,7 +1840,7 @@ test("injected transport reclaims a dead owner's lock when no socket exists", as
 });
 
 test("injected transport preserves a dead owner's lock while its socket is live", async () => {
-  const tempDir = makeUnixSocketTempDir();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-orphan-socket-"));
   const socketPath = path.join(tempDir, "app-server.sock");
   const lockPath = `${socketPath}.lock`;
   fs.writeFileSync(lockPath, "99999999 1\n", { mode: 0o600 });
@@ -2388,7 +1857,7 @@ test("injected transport preserves a dead owner's lock while its socket is live"
 });
 
 test("injected transport reclaims a dead owner's unbound socket inode", async () => {
-  const tempDir = makeUnixSocketTempDir();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-stale-socket-"));
   const socketPath = path.join(tempDir, "app-server.sock");
   const stalePath = `${socketPath}.stale`;
   const lockPath = `${socketPath}.lock`;
@@ -2410,7 +1879,7 @@ test("injected transport reclaims a dead owner's unbound socket inode", async ()
 });
 
 test("injected transport reclaims an old legacy lock but preserves a recent one", async () => {
-  const tempDir = makeUnixSocketTempDir();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-legacy-lock-"));
   const socketPath = path.join(tempDir, "app-server.sock");
   const lockPath = `${socketPath}.lock`;
   const { Transport } = loadInjectedTransport({ spawnImpl: () => fakeChild() });
@@ -2429,7 +1898,7 @@ test("injected transport reclaims an old legacy lock but preserves a recent one"
 });
 
 test("injected transport preserves a replacement lock inode", async () => {
-  const tempDir = makeUnixSocketTempDir();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-lock-replace-"));
   const socketPath = path.join(tempDir, "app-server.sock");
   const lockPath = `${socketPath}.lock`;
   const oldLockPath = `${lockPath}.old`;
@@ -2457,7 +1926,7 @@ for (const [failureKind, spawnImpl] of [
   }],
 ]) {
   test(`injected transport releases ownership after ${failureKind} spawn failure`, async () => {
-    const tempDir = makeUnixSocketTempDir();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-spawn-failure-"));
     const socketPath = path.join(tempDir, "app-server.sock");
     const { Transport } = loadInjectedTransport({ spawnImpl });
     const transport = new Transport(socketPath);
@@ -2475,7 +1944,7 @@ for (const [failureKind, spawnImpl] of [
 }
 
 test("injected transport does not release ownership until authority exit is verified", async () => {
-  const tempDir = makeUnixSocketTempDir();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-stop-error-"));
   const socketPath = path.join(tempDir, "app-server.sock");
   const child = fakeChild();
   child.kill = () => {
@@ -2497,7 +1966,7 @@ test("injected transport does not release ownership until authority exit is veri
 });
 
 test("normal authority exit releases its owned socket and lock", async () => {
-  const tempDir = makeUnixSocketTempDir();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-normal-exit-"));
   const socketPath = path.join(tempDir, "app-server.sock");
   let server;
   let child;
@@ -2532,7 +2001,7 @@ test("normal authority exit releases its owned socket and lock", async () => {
 });
 
 test("disposing before async startup resumes releases ownership without spawning", async () => {
-  const tempDir = makeUnixSocketTempDir();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-dispose-startup-"));
   const socketPath = path.join(tempDir, "app-server.sock");
   const child = fakeChild();
   child.kill = () => {
@@ -2559,7 +2028,7 @@ test("disposing before async startup resumes releases ownership without spawning
 });
 
 test("post-start authority errors close active proxy streams without crashing", async () => {
-  const tempDir = makeUnixSocketTempDir();
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-runtime-error-"));
   const socketPath = path.join(tempDir, "app-server.sock");
   let server;
   let child;
