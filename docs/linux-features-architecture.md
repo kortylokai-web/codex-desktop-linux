@@ -65,10 +65,10 @@ The build pipeline loads enabled features in these phases:
    critical patch enforcement must succeed before the build continues.
 2. App staging: declarative resources and runtime hooks are copied into
    `codex-app/` synchronously.
-3. Build metadata: build information is generated after critical patch
-   enforcement and synchronous feature staging have completed.
-4. Legacy staging: optional `stage.sh` hooks run for features that still need
+3. Legacy staging: optional `stage.sh` hooks run for features that still need
    custom install-time logic.
+4. Build metadata: build information is generated after critical patch
+   enforcement, declarative staging, and legacy staging have completed.
 5. Native packaging: declarative package resources and dependencies are added
    to `.deb`, `.rpm`, or pacman payloads, then optional package hooks can mutate
    the staging root.
