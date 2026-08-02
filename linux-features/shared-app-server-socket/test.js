@@ -27,8 +27,6 @@ const socketEnvHook = path.join(__dirname, "socket-env.sh");
 const descriptorReader = path.join(__dirname, "descriptor-reader.js");
 const expectedPatchSentinel = "/*codex-linux:shared-app-server-socket:v2*/";
 const unixSocketPathMaxBytes = 107;
-const attachmentSelectorSource =
-  "if(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY===`1`){if(e.hostConfig.kind!==`local`)throw Error(`external app-server socket mode requires a local host`);if(!process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)throw Error(`external app-server socket mode requires CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET`);return new CodexLinuxExternalAppServerSocketTransport(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)}";
 
 function loadDescriptorReader() {
   assert.equal(
