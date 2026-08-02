@@ -151,8 +151,6 @@ const {
 } = require("./lib/linux-target-context.js");
 const {
   enabledLinuxFeatureIds,
-  loadLinuxFeaturePatchDescriptors,
-  stageEnabledLinuxFeatureInstall,
 } = require("./lib/linux-features.js");
 const {
   applyLinuxAppUpdaterBridgePatch,
@@ -167,7 +165,6 @@ const {
   githubCommitUrl,
   packageProfile,
   sourceInfo,
-  writeBuildInfo,
 } = require("./lib/build-info.js");
 const {
   createPatchReport,
@@ -695,6 +692,19 @@ test("build info captures DMG hash, features, distro profile, and source revisio
       JSON.stringify({ enabled: ["read-aloud", "open-target-discovery"] }),
       "utf8",
     );
+    for (const [id, capabilities] of Object.entries({
+      "read-aloud": ["read-aloud-capability"],
+      "open-target-discovery": ["open-target-discovery-capability"],
+    })) {
+      const featureDir = path.join(featuresRoot, id);
+      fs.mkdirSync(featureDir, { recursive: true });
+      fs.writeFileSync(path.join(featureDir, "README.md"), `# ${id}\n`);
+      fs.writeFileSync(
+        path.join(featureDir, "feature.json"),
+        JSON.stringify({ id, title: id, capabilities }),
+        "utf8",
+      );
+    }
 
     const info = buildInfo({
       repoDir: tempRoot,
@@ -731,6 +741,10 @@ test("build info captures DMG hash, features, distro profile, and source revisio
     assert.equal(info.packageProfile.id, "debian-family");
     assert.equal(info.packageProfile.packageManager, "apt");
     assert.deepEqual(info.linuxFeatures.enabled, ["read-aloud", "open-target-discovery"]);
+    assert.deepEqual(info.linuxCapabilities, [
+      "open-target-discovery-capability",
+      "read-aloud-capability",
+    ]);
     assert.equal(info.linuxFeatures.configPath, undefined);
   } finally {
     if (pinnedFeaturesConfig != null) {
@@ -740,61 +754,27 @@ test("build info captures DMG hash, features, distro profile, and source revisio
   }
 });
 
-test("build info advertises the external attachment capability only for a complete staged feature", () => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-build-info-attachment-"));
+test("build info derives capabilities from enabled manifests without staged app inputs", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-build-info-capabilities-"));
   const pinnedFeaturesConfig = process.env.CODEX_LINUX_FEATURES_CONFIG;
   delete process.env.CODEX_LINUX_FEATURES_CONFIG;
   try {
     const dmgPath = path.join(tempRoot, "Codex.dmg");
     const appDir = path.join(tempRoot, "Codex.app");
-    const installDir = path.join(tempRoot, "install");
-    const extractedAppRoot = path.join(tempRoot, "app-extracted");
     const featuresRoot = path.join(tempRoot, "linux-features");
-    const sharedFeatureDir = path.join(featuresRoot, "shared-app-server-socket");
-    const configPath = path.join(featuresRoot, "features.json");
-    const generatedBuildInfoPath = path.join(tempRoot, "metadata", "build-info.json");
-    const capability = "external-app-server-attachment-descriptor-v1";
-    const readerTarget = path.join(
-      installDir,
-      ".codex-linux",
-      "features",
-      "shared-app-server-socket",
-      "descriptor-reader.js",
-    );
-    const hookTarget = path.join(
-      installDir,
-      ".codex-linux",
-      "launcher.d",
-      "shared-app-server-socket-socket-env.sh",
-    );
-    const mainBundleDirectory = path.join(extractedAppRoot, ".vite", "build");
-    const mainBundlePath = path.join(mainBundleDirectory, "main.js");
-    const hashedMainBundlePath = path.join(mainBundleDirectory, "main--hash.js");
-    const attachmentSelector =
-      "if(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY===`1`){if(e.hostConfig.kind!==`local`)throw Error(`external app-server socket mode requires a local host`);if(!process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)throw Error(`external app-server socket mode requires CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET`);return new CodexLinuxExternalAppServerSocketTransport(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)}";
-    const stagedMainBundleFixture = () => [
-      "var Ky=class{options;kind=`websocket`;logger=r.i(`AppServerTransportSshWebsocket`);proxyStreams=new Set;supportsReconnect(){return!0}",
-      "async connect(){let t={current:null},r=new n.zn(Fy,{perMessageDeflate:!1,createConnection:()=>",
-      "(t.current=this.createSshProxyStream(),t.current)});return n.Ln(r,{onPongTimeout:()=>r.terminate()}),new n.Rn(r)}};",
-      "function n6(e){let t=Jy(e.hostConfig);if(t)return Z.info(`selected app-server transport`),new Ky(t);",
-      "if(e.transportKind===`remote-control`)return new Remote(e);",
-      "if(n.io(e.hostConfig))return new Wsl({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator});",
-      "let r=r6(e.hostConfig);if(r){e.desktopAuthAppServerClient;let t=p8(e.hostConfig,r);return new n.Fn({hostConfig:e.hostConfig,websocketUrl:r,getWebsocketProtocols:void 0,...t==null?{}:{socksProxyUrl:t}})}",
-      "return new n.Nn({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator})}function afterFactory(){}",
-    ].join("");
-
+    const featureDir = path.join(featuresRoot, "manifest-capability");
     fs.writeFileSync(dmgPath, "fake dmg payload", "utf8");
-    fs.mkdirSync(path.join(appDir, "Contents"), { recursive: true });
-    fs.cpSync(
-      path.join(__dirname, "..", "linux-features", "shared-app-server-socket"),
-      sharedFeatureDir,
-      { recursive: true },
+    fs.mkdirSync(featureDir, { recursive: true });
+    fs.mkdirSync(appDir, { recursive: true });
+    fs.writeFileSync(path.join(featuresRoot, "features.json"), '{"enabled":["manifest-capability"]}\n');
+    fs.writeFileSync(path.join(featureDir, "README.md"), "# Manifest Capability\n");
+    fs.writeFileSync(
+      path.join(featureDir, "feature.json"),
+      '{"id":"manifest-capability","title":"Manifest Capability","capabilities":["manifest-capability-v1"]}\n',
     );
 
-    const buildAttachmentInfoOptions = () => ({
+    const info = buildInfo({
       repoDir: tempRoot,
-      installDir,
-      extractedAppRoot,
       dmgPath,
       appDir,
       electronVersion: "41.3.0",
@@ -807,151 +787,8 @@ test("build info advertises the external attachment capability only for a comple
         env: { PATH: "" },
       }),
     });
-    const buildAttachmentInfo = () => buildInfo(buildAttachmentInfoOptions());
-    const capabilities = () => buildAttachmentInfo().linuxCapabilities;
-    const enableSharedFeature = () => {
-      fs.writeFileSync(configPath, '{"enabled":["shared-app-server-socket"]}\n');
-      stageEnabledLinuxFeatureInstall(installDir, { featuresRoot });
-      const descriptor = loadLinuxFeaturePatchDescriptors({ featuresRoot }).find(
-        (entry) => entry.id === "feature:shared-app-server-socket:main-process-shared-app-server-socket",
-      );
-      assert.ok(descriptor);
-      fs.rmSync(mainBundleDirectory, { recursive: true, force: true });
-      fs.mkdirSync(mainBundleDirectory, { recursive: true });
-      fs.writeFileSync(mainBundlePath, descriptor.apply(stagedMainBundleFixture()));
-    };
-    const assertIncompleteFeature = (label, options = buildAttachmentInfoOptions()) => {
-      assert.throws(
-        () => writeBuildInfo({ ...options, outputPaths: [generatedBuildInfoPath] }),
-        (error) => {
-          assert.equal(error?.code, "external-attachment-capability-incomplete");
-          assert.match(error.message, /shared-app-server-socket/);
-          return true;
-        },
-        label,
-      );
-      assert.equal(fs.existsSync(generatedBuildInfoPath), false, label);
-    };
 
-    enableSharedFeature();
-    const completeInfo = buildAttachmentInfo();
-    assert.equal(completeInfo.schemaVersion, 1);
-    assert.equal(Array.isArray(completeInfo.linuxCapabilities), true);
-    assert.deepEqual(completeInfo.linuxCapabilities, [capability]);
-
-    fs.renameSync(mainBundlePath, hashedMainBundlePath);
-    assert.deepEqual(capabilities(), [capability]);
-    const buildInfoShell = fs.readFileSync(path.join(__dirname, "lib", "build-info.sh"), "utf8");
-    assert.match(buildInfoShell, /"\$WORK_DIR\/app-extracted"/);
-
-    fs.writeFileSync(configPath, '{"enabled":[]}\n');
-    assert.deepEqual(capabilities(), []);
-
-    fs.writeFileSync(configPath, '{"enabled":["unrelated-feature"]}\n');
-    assert.deepEqual(capabilities(), []);
-
-    enableSharedFeature();
-    fs.rmSync(mainBundlePath);
-    assertIncompleteFeature("an absent extracted main bundle must fail build metadata generation");
-
-    enableSharedFeature();
-    fs.copyFileSync(mainBundlePath, hashedMainBundlePath);
-    assertIncompleteFeature(
-      "literal and hashed extracted main bundles must fail build metadata generation",
-    );
-
-    enableSharedFeature();
-    const firstHashedMainBundle = path.join(mainBundleDirectory, "main--one.js");
-    const secondHashedMainBundle = path.join(mainBundleDirectory, "main--two.js");
-    fs.renameSync(mainBundlePath, firstHashedMainBundle);
-    fs.copyFileSync(firstHashedMainBundle, secondHashedMainBundle);
-    assertIncompleteFeature("multiple hashed main bundles must fail build metadata generation");
-
-    enableSharedFeature();
-    const symlinkedExtractedRoot = path.join(tempRoot, "symlinked-app-extracted");
-    fs.symlinkSync(extractedAppRoot, symlinkedExtractedRoot, "dir");
-    assertIncompleteFeature(
-      "a symlinked extracted app root must fail build metadata generation",
-      { ...buildAttachmentInfoOptions(), extractedAppRoot: symlinkedExtractedRoot },
-    );
-    fs.unlinkSync(symlinkedExtractedRoot);
-
-    enableSharedFeature();
-    fs.rmSync(mainBundlePath);
-    fs.mkdirSync(mainBundlePath);
-    assertIncompleteFeature("a non-regular main bundle must fail build metadata generation");
-
-    enableSharedFeature();
-    fs.rmSync(readerTarget);
-    assertIncompleteFeature("missing staged descriptor reader must fail build metadata generation");
-
-    enableSharedFeature();
-    fs.rmSync(hookTarget);
-    assertIncompleteFeature("missing staged launcher hook must fail build metadata generation");
-
-    enableSharedFeature();
-    fs.writeFileSync(readerTarget, "staging drift\n");
-    assertIncompleteFeature("staged resource drift must fail build metadata generation");
-
-    enableSharedFeature();
-    const symlinkedInstallDir = path.join(tempRoot, "symlinked-install");
-    fs.symlinkSync(installDir, symlinkedInstallDir, "dir");
-    assertIncompleteFeature(
-      "a symlinked install root must fail build metadata generation",
-      { ...buildAttachmentInfoOptions(), installDir: symlinkedInstallDir },
-    );
-    fs.unlinkSync(symlinkedInstallDir);
-
-    enableSharedFeature();
-    const featureResourcesParent = path.dirname(path.dirname(readerTarget));
-    const outsideFeatureResources = path.join(tempRoot, "outside-feature-resources");
-    fs.cpSync(featureResourcesParent, outsideFeatureResources, { recursive: true });
-    fs.rmSync(featureResourcesParent, { recursive: true });
-    fs.symlinkSync(outsideFeatureResources, featureResourcesParent, "dir");
-    assertIncompleteFeature("a symlinked staged resource parent must fail build metadata generation");
-    fs.unlinkSync(featureResourcesParent);
-    fs.cpSync(outsideFeatureResources, featureResourcesParent, { recursive: true });
-
-    enableSharedFeature();
-    const outsideMainBundle = path.join(tempRoot, "outside-main.js");
-    fs.copyFileSync(mainBundlePath, outsideMainBundle);
-    fs.rmSync(mainBundlePath);
-    fs.symlinkSync(outsideMainBundle, mainBundlePath);
-    assertIncompleteFeature("a symlinked staged main bundle must fail build metadata generation");
-    fs.unlinkSync(mainBundlePath);
-    fs.copyFileSync(outsideMainBundle, mainBundlePath);
-
-    enableSharedFeature();
-    fs.chmodSync(readerTarget, 0o4644);
-    assertIncompleteFeature("a staged reader with special permission bits must fail build metadata generation");
-
-    enableSharedFeature();
-    fs.chmodSync(hookTarget, 0o2755);
-    assertIncompleteFeature("a staged launcher hook with special permission bits must fail build metadata generation");
-
-    enableSharedFeature();
-    // The feature source still contains every legacy token. Only the built main
-    // bundle lost the selector, so this proves metadata validates installed truth.
-    fs.writeFileSync(
-      mainBundlePath,
-      fs.readFileSync(mainBundlePath, "utf8").replace(attachmentSelector, ""),
-    );
-    assertIncompleteFeature("a partial selector must fail build metadata generation");
-
-    enableSharedFeature();
-    const completeMainBundle = fs.readFileSync(mainBundlePath, "utf8");
-    const attachmentClassIndex = completeMainBundle.indexOf(
-      "class CodexLinuxExternalAppServerSocketTransport",
-    );
-    assert.notEqual(attachmentClassIndex, -1);
-    fs.writeFileSync(
-      mainBundlePath,
-      completeMainBundle.slice(0, attachmentClassIndex) + completeMainBundle.slice(attachmentClassIndex).replace(
-        "supportsReconnect(){return!0}",
-        "supportsReconnect(){return!1}",
-      ),
-    );
-    assertIncompleteFeature("a partial transport must fail build metadata generation");
+    assert.deepEqual(info.linuxCapabilities, ["manifest-capability-v1"]);
   } finally {
     if (pinnedFeaturesConfig != null) {
       process.env.CODEX_LINUX_FEATURES_CONFIG = pinnedFeaturesConfig;

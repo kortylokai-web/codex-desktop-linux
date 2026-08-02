@@ -61,15 +61,18 @@ fall back to manifest defaults rather than failing the build.
 
 The build pipeline loads enabled features in these phases:
 
-1. ASAR patching: patch descriptors modify extracted upstream app files.
+1. ASAR patching: patch descriptors modify extracted upstream app files, and
+   critical patch enforcement must succeed before the build continues.
 2. App staging: declarative resources and runtime hooks are copied into
-   `codex-app/`.
-3. Legacy staging: optional `stage.sh` hooks run for features that still need
+   `codex-app/` synchronously.
+3. Build metadata: build information is generated after critical patch
+   enforcement and synchronous feature staging have completed.
+4. Legacy staging: optional `stage.sh` hooks run for features that still need
    custom install-time logic.
-4. Native packaging: declarative package resources and dependencies are added
+5. Native packaging: declarative package resources and dependencies are added
    to `.deb`, `.rpm`, or pacman payloads, then optional package hooks can mutate
    the staging root.
-5. Runtime: the launcher consumes staged environment files, prelaunch hooks,
+6. Runtime: the launcher consumes staged environment files, prelaunch hooks,
    Electron args, and cold-start hooks.
 
 Native packages copy the configured feature root into the packaged
@@ -88,15 +91,20 @@ manifest and must clean up any feature-owned files themselves.
 ## Build Capabilities
 
 Schema-1 Linux build information includes a top-level `linuxCapabilities`
-array. A capability is a narrow statement about an installed app payload, not
-about every enabled feature id. A feature may advertise a capability only when
-its required patch descriptor accepts the staged main bundle as already
-complete and its declared resources and executable runtime hooks are staged
-byte-for-byte with their declared modes, without symbolic-link path components
-or undeclared special permission bits. A disabled feature leaves the
-capability out of the build information. If an enabled feature is missing,
-changed, or incomplete, build metadata generation fails instead of publishing
-a successful payload with an omitted capability.
+array. Features may optionally declare `capabilities` in their manifests. Each
+declaration is a unique, nonempty string without whitespace. The build-info
+generator loads enabled manifests, rejects duplicate capability ownership, and
+emits their capabilities in deterministic order. Disabled feature declarations
+are omitted.
+
+Critical patch enforcement and synchronous app staging complete before this
+metadata is generated. That ordering is the completeness proof for a
+capability-bearing build; build-info records manifest declarations and does not
+repeat feature-specific payload inspection.
+
+Upstream-DMG acceptance resolves candidate enabled feature ids against the
+candidate feature manifests and requires an exact capability multiset match.
+Missing, duplicated, unclaimed, or stale capabilities reject the candidate.
 
 The launcher accepts `--print-build-info` as its first argument for inspection
 tools. It reads and prints its own
@@ -105,6 +113,14 @@ feature hooks, launcher setup, webview startup, Electron, updater interaction,
 or warm-start handling. Arguments after the inspection flag are ignored.
 
 ## Manifest Keys
+
+`capabilities` declares optional Linux build capabilities:
+
+```json
+{
+  "capabilities": ["my-feature-capability-v1"]
+}
+```
 
 `entrypoints` declares optional feature code hooks. Feature patching uses only
 `patchDescriptors`; features that only stage resources, runtime hooks, package
