@@ -102,10 +102,6 @@ metadata is generated. That ordering is the completeness proof for a
 capability-bearing build; build-info records manifest declarations and does not
 repeat feature-specific payload inspection.
 
-Upstream-DMG acceptance resolves candidate enabled feature ids against the
-candidate feature manifests and requires an exact capability multiset match.
-Missing, duplicated, unclaimed, or stale capabilities reject the candidate.
-
 The launcher accepts `--print-build-info` as its first argument for inspection
 tools. It reads and prints its own
 `resources/codex-linux-build-info.json` byte-for-byte, then exits before

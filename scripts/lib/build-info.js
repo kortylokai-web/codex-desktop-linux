@@ -335,26 +335,12 @@ function main() {
     appId,
     appDisplayName,
   ] = process.argv.slice(2);
-  if (
-    [
-      repoDir,
-      installDir,
-      dmgPath,
-      appDir,
-      electronVersion,
-      appId,
-      appDisplayName,
-    ].some((value) => !value)
-  ) {
-    console.error(
-      "Usage: build-info.js <repo-dir> <install-dir> <dmg-path> <app-dir> "
-        + "<electron-version> <app-id> <app-display-name>",
-    );
+  if ([repoDir, installDir, dmgPath, appDir, electronVersion, appId, appDisplayName].some((value) => !value)) {
+    console.error("Usage: build-info.js <repo-dir> <install-dir> <dmg-path> <app-dir> <electron-version> <app-id> <app-display-name>");
     process.exit(1);
   }
   writeBuildInfo({
     repoDir,
-    installDir,
     dmgPath,
     appDir,
     electronVersion,

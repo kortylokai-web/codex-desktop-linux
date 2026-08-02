@@ -38,35 +38,18 @@ function writeJson(root, name, value) {
   return filePath;
 }
 
-function writeFeatureManifest(root, id, capabilities) {
-  const featureDir = path.join(root, "linux-features", id);
-  fs.mkdirSync(featureDir, { recursive: true });
-  fs.writeFileSync(path.join(featureDir, "README.md"), `# ${id}\n`);
-  fs.writeFileSync(
-    path.join(featureDir, "feature.json"),
-    `${JSON.stringify({ id, title: id, capabilities }, null, 2)}\n`,
-  );
-}
-
 function evaluate(root, dmg, overrides = {}) {
   const core = writeJson(root, "core.json", overrides.core ?? requiredCoreReport());
   return evaluateUpstreamDmg({
     dmgPath: dmg,
     coreReportPath: overrides.corePath ?? core,
-    buildInfoPath: overrides.buildInfoPath,
     buildStatus: overrides.buildStatus ?? "success",
     repoRoot: root,
-    featuresRoot: overrides.featuresRoot,
   });
 }
 
 test("accepts a candidate when the shared release profile passes", () => withFixture(({ root, dmg }) => {
-  const buildInfoPath = writeJson(root, "accepted-build-info.json", {
-    schemaVersion: 1,
-    linuxFeatures: { enabled: [] },
-    linuxCapabilities: [],
-  });
-  const decision = evaluate(root, dmg, { buildInfoPath });
+  const decision = evaluate(root, dmg);
   assert.equal(decision.verdict, "accepted");
   assert.equal(decision.blockers.length, 0);
 }));
@@ -74,12 +57,7 @@ test("accepts a candidate when the shared release profile passes", () => withFix
 test("keeps optional drift non-blocking", () => withFixture(({ root, dmg }) => {
   const core = requiredCoreReport();
   core.patches.push(patch("optional-ui", { status: "skipped-optional", ciPolicy: "optional", reason: "needle moved" }));
-  const buildInfoPath = writeJson(root, "optional-drift-build-info.json", {
-    schemaVersion: 1,
-    linuxFeatures: { enabled: [] },
-    linuxCapabilities: [],
-  });
-  const decision = evaluate(root, dmg, { core, buildInfoPath });
+  const decision = evaluate(root, dmg, { core });
   assert.equal(decision.verdict, "accepted_with_warnings");
   assert.equal(decision.warnings.length, 1);
 }));
@@ -136,86 +114,20 @@ test("does not probe or block a disabled feature", () => withFixture(({ root, dm
     sourceKind: "feature",
     featureId: "ui-tweaks",
   }));
-  const buildInfoPath = writeJson(root, "disabled-feature-build-info.json", {
-    schemaVersion: 1,
-    linuxFeatures: { enabled: [] },
-    linuxCapabilities: [],
-  });
-  const decision = evaluate(root, dmg, { core, buildInfoPath });
+  const decision = evaluate(root, dmg, { core });
   assert.equal(decision.verdict, "accepted");
   assert.equal(decision.blockers.length, 0);
 }));
 
-test("requires candidate capabilities to exactly match enabled manifest declarations", () => withFixture(({ root, dmg }) => {
-  const featureId = "manifest-capability";
-  const capability = "manifest-capability-v1";
-  writeFeatureManifest(root, featureId, [capability]);
-  const core = requiredCoreReport();
-  core.enabledFeatures = [featureId];
-
-  for (const { linuxCapabilities, verdict, corePath } of [
-    { linuxCapabilities: [capability], verdict: "accepted" },
-    { linuxCapabilities: [], verdict: "rejected", corePath: path.join(root, "missing-core.json") },
-    { linuxCapabilities: [capability, capability], verdict: "rejected" },
-    { linuxCapabilities: [capability, "unclaimed-capability"], verdict: "rejected" },
-  ]) {
-    const buildInfoPath = writeJson(root, `build-info-${linuxCapabilities.length}.json`, {
-      schemaVersion: 1,
-      linuxFeatures: { enabled: [featureId] },
-      linuxCapabilities,
-    });
-    const decision = evaluate(root, dmg, { core, corePath, buildInfoPath });
-    assert.equal(decision.verdict, verdict);
-    assert.equal(
-      decision.blockers.some((item) => item.code === "linux-feature-capabilities"),
-      verdict === "rejected",
-    );
-  }
-}));
-
-test("requires disabled candidates to declare an empty capability multiset", () => withFixture(({ root, dmg }) => {
-  const capability = "manifest-capability-v1";
-  writeFeatureManifest(root, "manifest-capability", [capability]);
-  const core = requiredCoreReport();
-  core.enabledFeatures = [];
-
-  const missingBuildInfoDecision = evaluate(root, dmg, { core });
-  assert.equal(missingBuildInfoDecision.verdict, "rejected");
-  assert.ok(
-    missingBuildInfoDecision.blockers.some(
-      (item) => item.code === "linux-feature-capabilities",
-    ),
-  );
-
-  for (const [linuxCapabilities, verdict] of [
-    [[], "accepted"],
-    [[capability], "rejected"],
-  ]) {
-    const buildInfoPath = writeJson(root, `disabled-build-info-${linuxCapabilities.length}.json`, {
-      schemaVersion: 1,
-      linuxFeatures: { enabled: [] },
-      linuxCapabilities,
-    });
-    const decision = evaluate(root, dmg, { core, buildInfoPath });
-    assert.equal(decision.verdict, verdict);
-  }
-}));
-
 test("the local and GitHub CLI surfaces use the same verdict", () => withFixture(({ root, dmg }) => {
   const core = writeJson(root, "cli-core.json", requiredCoreReport());
-  const buildInfo = writeJson(root, "cli-build-info.json", {
-    schemaVersion: 1,
-    linuxFeatures: { enabled: [] },
-    linuxCapabilities: [],
-  });
   const cli = path.join(__dirname, "../validate-upstream-dmg.js");
   const verdicts = [];
   for (const source of ["local", "github-actions"]) {
     const output = path.join(root, `${source}.json`);
     const result = spawnSync(process.execPath, [
       cli, "--dmg", dmg, "--core-report", core, "--build-status", "success",
-      "--build-info", buildInfo, "--output", output, "--source", source,
-      "--repo-root", root,
+      "--output", output, "--source", source, "--repo-root", root,
     ], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
     verdicts.push(JSON.parse(fs.readFileSync(output, "utf8")).verdict);
@@ -235,15 +147,9 @@ test("marks unstructured build failures and a missing core report inconclusive",
 test("marks malformed reports inconclusive instead of throwing", () => withFixture(({ root, dmg }) => {
   const malformed = path.join(root, "malformed.json");
   fs.writeFileSync(malformed, "{not-json");
-  const buildInfoPath = writeJson(root, "malformed-report-build-info.json", {
-    schemaVersion: 1,
-    linuxFeatures: { enabled: [] },
-    linuxCapabilities: [],
-  });
   const decision = evaluateUpstreamDmg({
     dmgPath: dmg,
     coreReportPath: malformed,
-    buildInfoPath,
     buildStatus: "success",
     repoRoot: root,
   });

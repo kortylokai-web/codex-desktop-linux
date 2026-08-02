@@ -78,76 +78,13 @@ function sharedTransportClassSource(symbols) {
   );
 }
 
-function countOccurrences(source, fragment) {
-  return source.split(fragment).length - 1;
-}
-
-function hasCompletePatchStructure(source) {
-  if (
-    countOccurrences(source, PATCH_SENTINEL) !== 1 ||
-    countOccurrences(source, ATTACHMENT_CLASS) !== 1 ||
-    countOccurrences(source, ATTACHMENT_SELECTOR) !== 1 ||
-    countOccurrences(source, SHARED_CLASS) !== 1 ||
-    countOccurrences(source, SHARED_SELECTOR) !== 1
-  ) {
-    return false;
-  }
-
-  const symbols = findTransportSymbols(source);
-  if (symbols == null) return false;
-  const selectionLogIndex = source.indexOf("selected app-server transport");
-  const factoryStart = source.lastIndexOf("function ", selectionLogIndex);
-  const factoryEnd = source.indexOf("function ", selectionLogIndex + 1);
-  if (selectionLogIndex < 0 || factoryStart < 0 || factoryEnd < 0) return false;
-
-  const expectedClassBlock =
-    PATCH_SENTINEL +
-    attachmentTransportClassSource(symbols) +
-    sharedTransportClassSource(symbols);
-  if (
-    factoryStart < expectedClassBlock.length ||
-    source.slice(factoryStart - expectedClassBlock.length, factoryStart) !== expectedClassBlock
-  ) {
-    return false;
-  }
-
-  const factorySource = source.slice(factoryStart, factoryEnd);
-  const factoryBodyStart = factorySource.indexOf("{") + 1;
-  if (
-    factoryBodyStart <= 0 ||
-    !factorySource.startsWith(ATTACHMENT_SELECTOR, factoryBodyStart)
-  ) {
-    return false;
-  }
-  const sharedSelectorIndex = factorySource.indexOf(SHARED_SELECTOR);
-  if (sharedSelectorIndex <= factoryBodyStart + ATTACHMENT_SELECTOR.length) return false;
-
-  const beforeSharedSelector = factorySource.slice(0, sharedSelectorIndex);
-  const fallbackAtEndPattern = new RegExp(
-    `if\\(${symbols.namespace}\\.${IDENT}\\(e\\.hostConfig\\)\\)return new ${IDENT}\\(\\{hostConfig:e\\.hostConfig,repoRoot:e\\.repoRoot,resourcesPath:e\\.resourcesPath,defaultOriginator:e\\.defaultOriginator\\}\\);$`,
-  );
-  if (!fallbackAtEndPattern.test(beforeSharedSelector)) return false;
-  const afterSharedSelector = factorySource.slice(sharedSelectorIndex + SHARED_SELECTOR.length);
-  const localContinuationPattern = new RegExp(
-    `^let (${IDENT})=(${IDENT})\\(e\\.hostConfig\\);if\\(\\1\\)\\{`,
-  );
-  return localContinuationPattern.test(afterSharedSelector);
-}
-
 function applySharedAppServerSocketPatch(source) {
-  const hasSentinel = source.includes(PATCH_SENTINEL);
-  const hasAttachmentClass = source.includes(ATTACHMENT_CLASS);
-  const hasAttachmentSelector = source.includes(ATTACHMENT_SELECTOR);
-  const hasSharedClass = source.includes(SHARED_CLASS);
-  const hasSharedSelector = source.includes(SHARED_SELECTOR);
-  const hasCompletePatch = hasSentinel && hasCompletePatchStructure(source);
-  if (hasCompletePatch) return source;
+  if (source.includes(PATCH_SENTINEL)) return source;
   if (
-    hasSentinel ||
-    hasAttachmentClass ||
-    hasAttachmentSelector ||
-    hasSharedClass ||
-    hasSharedSelector
+    source.includes(ATTACHMENT_CLASS) ||
+    source.includes(ATTACHMENT_SELECTOR) ||
+    source.includes(SHARED_CLASS) ||
+    source.includes(SHARED_SELECTOR)
   ) {
     throw Error("inconsistent shared app-server socket patch state");
   }

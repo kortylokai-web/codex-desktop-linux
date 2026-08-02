@@ -5,7 +5,6 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const { sourceInfo } = require("./build-info.js");
-const { linuxFeatureManifestMap, linuxFeaturesRoot } = require("./linux-features.js");
 const { enabledFeatureFailuresFromReport, optionalDriftFromReport } = require("./patch-report.js");
 const { readPatchReport, validatePatchReport } = require("./patch-validation.js");
 const { UPSTREAM_DMG_RELEASE_PROFILE } = require("./upstream-dmg-release-profile.js");
@@ -119,88 +118,10 @@ function buildDmgInfo({ dmgPath, metadata, buildInfo }) {
   };
 }
 
-function candidateEnabledLinuxFeatureIds(coreReport, buildInfo) {
-  return [...new Set([
-    ...(Array.isArray(coreReport?.enabledFeatures) ? coreReport.enabledFeatures : []),
-    ...(Array.isArray(buildInfo?.linuxFeatures?.enabled) ? buildInfo.linuxFeatures.enabled : []),
-  ].filter((feature) => typeof feature === "string"))]
-    .sort((left, right) => left.localeCompare(right));
-}
-
-function sameMultiset(expected, actual) {
-  if (!Array.isArray(actual) || expected.length !== actual.length) {
-    return false;
-  }
-  const counts = new Map();
-  for (const value of expected) {
-    counts.set(value, (counts.get(value) ?? 0) + 1);
-  }
-  for (const value of actual) {
-    const count = counts.get(value);
-    if (count == null || count === 0) {
-      return false;
-    }
-    counts.set(value, count - 1);
-  }
-  return [...counts.values()].every((count) => count === 0);
-}
-
-function linuxFeatureCapabilityBlockers(coreReport, buildInfo, options) {
-  const enabledFeatureIds = candidateEnabledLinuxFeatureIds(coreReport, buildInfo);
-  const repoRoot = options.repoRoot ?? process.cwd();
-  const featuresRoot = linuxFeaturesRoot({
-    featuresRoot: options.featuresRoot ?? path.join(repoRoot, "linux-features"),
-  });
-  let manifests;
-  try {
-    manifests = linuxFeatureManifestMap({ featuresRoot });
-  } catch (error) {
-    return [{
-      code: "linux-feature-capabilities",
-      check: "linux-features",
-      name: "manifest",
-      status: "failed",
-      reason: `Could not resolve candidate Linux feature manifests: ${error instanceof Error ? error.message : String(error)}`,
-    }];
-  }
-
-  const expected = [];
-  const blockers = [];
-  for (const featureId of enabledFeatureIds) {
-    const feature = manifests.get(featureId);
-    if (feature == null) {
-      blockers.push({
-        code: "linux-feature-capabilities",
-        check: `feature:${featureId}`,
-        name: featureId,
-        status: "failed",
-        reason: `Candidate enabled Linux feature '${featureId}' has no manifest in ${featuresRoot}`,
-      });
-      continue;
-    }
-    expected.push(...feature.manifest.capabilities);
-  }
-  if (blockers.length > 0) {
-    return blockers;
-  }
-
-  if (sameMultiset(expected, buildInfo?.linuxCapabilities)) {
-    return [];
-  }
-  return [{
-    code: "linux-feature-capabilities",
-    check: enabledFeatureIds.length === 0 ? "linux-features" : `feature:${enabledFeatureIds.join(",")}`,
-    name: "linuxCapabilities",
-    status: "failed",
-    reason: `Candidate Linux capabilities must exactly match enabled feature declarations: expected ${JSON.stringify(expected)}; received ${JSON.stringify(buildInfo?.linuxCapabilities)}`,
-  }];
-}
-
 function evaluateUpstreamDmg(options) {
   const profile = options.profile ?? UPSTREAM_DMG_RELEASE_PROFILE;
   let metadata = null;
   let buildInfo = null;
-  let buildInfoReadFailed = false;
   const inputErrors = [];
   try {
     metadata = readJsonIfPresent(options.metadataPath);
@@ -210,7 +131,6 @@ function evaluateUpstreamDmg(options) {
   try {
     buildInfo = readJsonIfPresent(options.buildInfoPath);
   } catch (error) {
-    buildInfoReadFailed = true;
     inputErrors.push(`invalid build metadata: ${error instanceof Error ? error.message : String(error)}`);
   }
   const core = readReportResult(options.coreReportPath);
@@ -235,9 +155,6 @@ function evaluateUpstreamDmg(options) {
     warnings.push(...driftWarnings("core", core.report, enabledFeatureFailureNames));
   } else {
     inconclusiveReasons.push(core.error);
-  }
-  if (options.buildStatus === "success" && !buildInfoReadFailed) {
-    blockers.push(...linuxFeatureCapabilityBlockers(core.report, buildInfo, options));
   }
 
   if (options.buildStatus !== "success") {

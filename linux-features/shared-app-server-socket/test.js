@@ -456,10 +456,6 @@ function syntheticBundle() {
   ].join("");
 }
 
-function partialPatchState() {
-  return `${expectedPatchSentinel}${syntheticBundle()}`;
-}
-
 test("shared-app-server-socket stays disabled until explicitly enabled", () => {
   withFeatureConfig([], (featuresRoot) => {
     assert.deepEqual(loadLinuxFeaturePatchDescriptors({ featuresRoot }), []);
@@ -505,8 +501,6 @@ test("feature stages the descriptor reader resource and executable socket hook",
 
 test("descriptor reader accepts the exact schema regardless of key order or whitespace", () => {
   const reader = loadDescriptorReader();
-  assert.equal(reader.DESCRIPTOR_SCHEMA_VERSION, 1);
-  assert.deepEqual(reader.DESCRIPTOR_KEYS, ["schemaVersion", "socketPath", "transport"]);
   withDescriptorTree((tree) => {
     const socketPath = "/tmp/attachment-test.sock";
     writeDescriptor(
@@ -876,77 +870,6 @@ test("patch selects the bridge only for the local host and is idempotent", () =>
   assert.match(patched, /new n\.zn\(Fy,/);
   assert.match(patched, /new n\.Rn\(/);
   assert.match(patched, /supportsReconnect\(\)\{return!0\}/);
-});
-
-test("candidate patch gate aborts on feature drift and partial patch states", async (t) => {
-  const cases = {
-    "unsupported bundle drift": "unrelated bundle",
-    "inconsistent partial patch state": partialPatchState(),
-  };
-
-  for (const [name, source] of Object.entries(cases)) {
-    await t.test(name, () => {
-      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shared-socket-required-gate-"));
-      const featuresRoot = path.join(tempRoot, "linux-features");
-      const featureDir = path.join(featuresRoot, "shared-app-server-socket");
-      const extractedDir = path.join(tempRoot, "app-extracted");
-      const buildDir = path.join(extractedDir, ".vite", "build");
-      const reportPath = path.join(tempRoot, "patch-report.json");
-      fs.mkdirSync(featureDir, { recursive: true });
-      fs.mkdirSync(buildDir, { recursive: true });
-      fs.copyFileSync(path.join(__dirname, "feature.json"), path.join(featureDir, "feature.json"));
-      fs.copyFileSync(path.join(__dirname, "patch.js"), path.join(featureDir, "patch.js"));
-      fs.copyFileSync(path.join(__dirname, "README.md"), path.join(featureDir, "README.md"));
-      fs.writeFileSync(
-        path.join(featuresRoot, "features.json"),
-        `${JSON.stringify({ enabled: ["shared-app-server-socket"] })}\n`,
-      );
-      fs.writeFileSync(path.join(buildDir, "main.js"), source);
-      fs.writeFileSync(path.join(extractedDir, "package.json"), "{}\n");
-
-      try {
-        const result = spawnSync(
-          process.execPath,
-          [
-            path.join(__dirname, "..", "..", "scripts", "patch-linux-window-ui.js"),
-            "--enforce-critical",
-            "--report-json",
-            reportPath,
-            extractedDir,
-          ],
-          {
-            encoding: "utf8",
-            env: {
-              ...process.env,
-              CODEX_LINUX_FEATURES_CONFIG: path.join(featuresRoot, "features.json"),
-              CODEX_LINUX_FEATURES_ROOT: featuresRoot,
-            },
-          },
-        );
-        assert.equal(
-          fs.existsSync(reportPath),
-          true,
-          `candidate patch gate must write its report before exiting\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
-        );
-        const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
-        const featureEntry = report.patches.find(
-          (patch) =>
-            patch.name ===
-            "feature:shared-app-server-socket:main-process-shared-app-server-socket",
-        );
-
-        assert.equal(result.status, 1);
-        assert.equal(featureEntry?.status, "failed-required");
-        assert.equal(featureEntry?.ciPolicy, "required-upstream");
-        assert.match(
-          result.stderr,
-          /feature:shared-app-server-socket:main-process-shared-app-server-socket \(failed-required\)/,
-        );
-      } finally {
-        fs.rmSync(tempRoot, { recursive: true, force: true });
-      }
-    });
-  }
 });
 
 test("patch selects attachment-only transport only for explicit local mode and fails closed", () => {

@@ -169,8 +169,6 @@ function main() {
 if (require.main === module) main();
 
 module.exports = {
-  DESCRIPTOR_SCHEMA_VERSION,
-  DESCRIPTOR_KEYS,
   readAttachmentDescriptor,
   routingRecords,
 };

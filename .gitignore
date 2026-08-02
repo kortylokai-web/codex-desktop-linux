@@ -5,13 +5,9 @@ __pycache__/
 *.py[cod]
 codex-app/
 codex-app.backup-*/
-codex-app-next.backup-*/
 .codex-app.candidate-*/
-.codex-app-next.candidate-*/
 .codex-app.promotion.json
-.codex-app-next.promotion.json
 .codex-app.promotion.lock
-.codex-app-next.promotion.lock
 codex-*-app/
 codex-app-next/
 bin/codex-*
