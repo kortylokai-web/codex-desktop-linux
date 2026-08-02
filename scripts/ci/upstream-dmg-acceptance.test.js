@@ -61,7 +61,12 @@ function evaluate(root, dmg, overrides = {}) {
 }
 
 test("accepts a candidate when the shared release profile passes", () => withFixture(({ root, dmg }) => {
-  const decision = evaluate(root, dmg);
+  const buildInfoPath = writeJson(root, "accepted-build-info.json", {
+    schemaVersion: 1,
+    linuxFeatures: { enabled: [] },
+    linuxCapabilities: [],
+  });
+  const decision = evaluate(root, dmg, { buildInfoPath });
   assert.equal(decision.verdict, "accepted");
   assert.equal(decision.blockers.length, 0);
 }));
@@ -69,7 +74,12 @@ test("accepts a candidate when the shared release profile passes", () => withFix
 test("keeps optional drift non-blocking", () => withFixture(({ root, dmg }) => {
   const core = requiredCoreReport();
   core.patches.push(patch("optional-ui", { status: "skipped-optional", ciPolicy: "optional", reason: "needle moved" }));
-  const decision = evaluate(root, dmg, { core });
+  const buildInfoPath = writeJson(root, "optional-drift-build-info.json", {
+    schemaVersion: 1,
+    linuxFeatures: { enabled: [] },
+    linuxCapabilities: [],
+  });
+  const decision = evaluate(root, dmg, { core, buildInfoPath });
   assert.equal(decision.verdict, "accepted_with_warnings");
   assert.equal(decision.warnings.length, 1);
 }));
@@ -126,7 +136,12 @@ test("does not probe or block a disabled feature", () => withFixture(({ root, dm
     sourceKind: "feature",
     featureId: "ui-tweaks",
   }));
-  const decision = evaluate(root, dmg, { core });
+  const buildInfoPath = writeJson(root, "disabled-feature-build-info.json", {
+    schemaVersion: 1,
+    linuxFeatures: { enabled: [] },
+    linuxCapabilities: [],
+  });
+  const decision = evaluate(root, dmg, { core, buildInfoPath });
   assert.equal(decision.verdict, "accepted");
   assert.equal(decision.blockers.length, 0);
 }));
@@ -164,6 +179,14 @@ test("requires disabled candidates to declare an empty capability multiset", () 
   const core = requiredCoreReport();
   core.enabledFeatures = [];
 
+  const missingBuildInfoDecision = evaluate(root, dmg, { core });
+  assert.equal(missingBuildInfoDecision.verdict, "rejected");
+  assert.ok(
+    missingBuildInfoDecision.blockers.some(
+      (item) => item.code === "linux-feature-capabilities",
+    ),
+  );
+
   for (const [linuxCapabilities, verdict] of [
     [[], "accepted"],
     [[capability], "rejected"],
@@ -180,13 +203,19 @@ test("requires disabled candidates to declare an empty capability multiset", () 
 
 test("the local and GitHub CLI surfaces use the same verdict", () => withFixture(({ root, dmg }) => {
   const core = writeJson(root, "cli-core.json", requiredCoreReport());
+  const buildInfo = writeJson(root, "cli-build-info.json", {
+    schemaVersion: 1,
+    linuxFeatures: { enabled: [] },
+    linuxCapabilities: [],
+  });
   const cli = path.join(__dirname, "../validate-upstream-dmg.js");
   const verdicts = [];
   for (const source of ["local", "github-actions"]) {
     const output = path.join(root, `${source}.json`);
     const result = spawnSync(process.execPath, [
       cli, "--dmg", dmg, "--core-report", core, "--build-status", "success",
-      "--output", output, "--source", source, "--repo-root", root,
+      "--build-info", buildInfo, "--output", output, "--source", source,
+      "--repo-root", root,
     ], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
     verdicts.push(JSON.parse(fs.readFileSync(output, "utf8")).verdict);
@@ -206,9 +235,15 @@ test("marks unstructured build failures and a missing core report inconclusive",
 test("marks malformed reports inconclusive instead of throwing", () => withFixture(({ root, dmg }) => {
   const malformed = path.join(root, "malformed.json");
   fs.writeFileSync(malformed, "{not-json");
+  const buildInfoPath = writeJson(root, "malformed-report-build-info.json", {
+    schemaVersion: 1,
+    linuxFeatures: { enabled: [] },
+    linuxCapabilities: [],
+  });
   const decision = evaluateUpstreamDmg({
     dmgPath: dmg,
     coreReportPath: malformed,
+    buildInfoPath,
     buildStatus: "success",
     repoRoot: root,
   });

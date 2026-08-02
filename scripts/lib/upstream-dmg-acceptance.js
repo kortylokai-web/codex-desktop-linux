@@ -147,10 +147,6 @@ function sameMultiset(expected, actual) {
 
 function linuxFeatureCapabilityBlockers(coreReport, buildInfo, options) {
   const enabledFeatureIds = candidateEnabledLinuxFeatureIds(coreReport, buildInfo);
-  if (enabledFeatureIds.length === 0 && buildInfo == null) {
-    return [];
-  }
-
   const repoRoot = options.repoRoot ?? process.cwd();
   const featuresRoot = linuxFeaturesRoot({
     featuresRoot: options.featuresRoot ?? path.join(repoRoot, "linux-features"),
@@ -204,6 +200,7 @@ function evaluateUpstreamDmg(options) {
   const profile = options.profile ?? UPSTREAM_DMG_RELEASE_PROFILE;
   let metadata = null;
   let buildInfo = null;
+  let buildInfoReadFailed = false;
   const inputErrors = [];
   try {
     metadata = readJsonIfPresent(options.metadataPath);
@@ -213,6 +210,7 @@ function evaluateUpstreamDmg(options) {
   try {
     buildInfo = readJsonIfPresent(options.buildInfoPath);
   } catch (error) {
+    buildInfoReadFailed = true;
     inputErrors.push(`invalid build metadata: ${error instanceof Error ? error.message : String(error)}`);
   }
   const core = readReportResult(options.coreReportPath);
@@ -238,7 +236,9 @@ function evaluateUpstreamDmg(options) {
   } else {
     inconclusiveReasons.push(core.error);
   }
-  blockers.push(...linuxFeatureCapabilityBlockers(core.report, buildInfo, options));
+  if (options.buildStatus === "success" && !buildInfoReadFailed) {
+    blockers.push(...linuxFeatureCapabilityBlockers(core.report, buildInfo, options));
+  }
 
   if (options.buildStatus !== "success") {
     inconclusiveReasons.push(`candidate build status: ${options.buildStatus ?? "unknown"}`);
