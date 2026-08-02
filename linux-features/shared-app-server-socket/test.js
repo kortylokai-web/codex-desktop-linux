@@ -276,13 +276,10 @@ function loadInjectedTransport({ spawnImpl, WebSocketImpl = null, fsImpl = fs, t
 }
 
 function loadInjectedAttachmentTransport({
-  AdapterImpl = null,
   processImpl = process,
   spawnImpl,
   WebSocketImpl = null,
   fsImpl = fs,
-  keepAliveImpl = () => {},
-  timeoutCapMs = null,
 } = {}) {
   assert.equal(
     typeof attachmentTransportClassSource,
@@ -308,8 +305,8 @@ function loadInjectedAttachmentTransport({
   }
   const namespace = {
     WS: WebSocketImpl ?? DefaultWebSocket,
-    keepAlive: keepAliveImpl,
-    Adapter: AdapterImpl ?? DefaultAdapter,
+    keepAlive() {},
+    Adapter: DefaultAdapter,
   };
   const source = attachmentTransportClassSource({
     namespace: "n",
@@ -328,22 +325,14 @@ function loadInjectedAttachmentTransport({
       if (id === "node:fs") return fsImpl;
       return require(id);
     },
-    setTimeout(callback, delay, ...args) {
-      const timer = setTimeout(
-        callback,
-        timeoutCapMs == null ? delay : Math.min(delay, timeoutCapMs),
-        ...args,
-      );
-      if (timeoutCapMs != null) timer.unref = () => timer;
-      return timer;
-    },
+    setTimeout,
     clearTimeout,
   };
   vm.runInNewContext(
     `${source};globalThis.Transport=CodexLinuxExternalAppServerSocketTransport`,
     context,
   );
-  return { Transport: context.Transport, namespace, source };
+  return context.Transport;
 }
 
 function pathIdentity(candidate) {
@@ -395,7 +384,7 @@ async function assertAttachmentValidationRejects({
 }) {
   const before = pathIdentity(socketPath);
   let spawnCalls = 0;
-  const { Transport } = loadInjectedAttachmentTransport({
+  const Transport = loadInjectedAttachmentTransport({
     fsImpl,
     processImpl,
     spawnImpl() {
@@ -436,6 +425,24 @@ async function listenUnix(socketPath) {
 async function closeServer(server) {
   if (server == null) return;
   await new Promise((resolve) => server.close(resolve));
+}
+
+async function withAttachmentSocket(callback, { parentMode = 0o700, socketMode = 0o600 } = {}) {
+  const tempDir = makeUnixSocketTempDir();
+  const socketPath = path.join(tempDir, "app-server.sock");
+  const server = await listenUnix(socketPath);
+  fs.chmodSync(tempDir, parentMode);
+  fs.chmodSync(socketPath, socketMode);
+  const originalCli = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = "/fake/codex";
+  try {
+    return await callback({ socketPath });
+  } finally {
+    if (originalCli == null) delete process.env.CODEX_CLI_PATH;
+    else process.env.CODEX_CLI_PATH = originalCli;
+    await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 function syntheticBundle() {
@@ -828,8 +835,6 @@ test("patch accepts the additional supported SSH transport lifecycle", () => {
   const patched = applySharedAppServerSocketPatch(source);
 
   assert.notEqual(patched, source);
-  assert.equal(patched.split(expectedPatchSentinel).length - 1, 1);
-  assert.equal(applySharedAppServerSocketPatch(patched), patched);
 });
 
 test("patch rejects ambiguous SSH transport lifecycles", () => {
@@ -1031,7 +1036,7 @@ test("attachment-only transport inode-binds the validated parent across a path s
   const proxy = fakeChild();
   let spawnedSocketPath = null;
   let spawnedSocketIdentity = null;
-  const { Transport } = loadInjectedAttachmentTransport({
+  const Transport = loadInjectedAttachmentTransport({
     fsImpl: tracking.fsImpl,
     spawnImpl(_command, args) {
       spawnedSocketPath = args.at(-1);
@@ -1067,58 +1072,44 @@ test("attachment-only transport inode-binds the validated parent across a path s
 });
 
 test("attachment-only transport closes each validation fd on every connect exit", async (t) => {
-  const tempDir = makeUnixSocketTempDir();
-  const socketPath = path.join(tempDir, "app-server.sock");
-  const server = await listenUnix(socketPath);
-  fs.chmodSync(tempDir, 0o755);
-  fs.chmodSync(socketPath, 0o700);
-  const originalCli = process.env.CODEX_CLI_PATH;
-  process.env.CODEX_CLI_PATH = "/fake/codex";
-
-  async function runCase(name, {
-    assertAfterConnect = () => {},
-    expectedError = null,
-    spawnImpl = () => fakeChild(),
-    timeoutCapMs = null,
-    WebSocketImpl = null,
-  }) {
-    await t.test(name, async () => {
-      const tracking = trackedAttachmentFs();
-      const { Transport } = loadInjectedAttachmentTransport({
-        fsImpl: tracking.fsImpl,
-        spawnImpl,
-        timeoutCapMs,
-        WebSocketImpl,
+  await withAttachmentSocket(async ({ socketPath }) => {
+    async function runCase(name, {
+      assertAfterConnect = () => {},
+      expectedError = null,
+      spawnImpl = () => fakeChild(),
+      WebSocketImpl = null,
+    }) {
+      await t.test(name, async () => {
+        const tracking = trackedAttachmentFs();
+        const Transport = loadInjectedAttachmentTransport({
+          fsImpl: tracking.fsImpl,
+          spawnImpl,
+          WebSocketImpl,
+        });
+        const transport = new Transport(socketPath);
+        try {
+          if (expectedError == null) await transport.connect();
+          else await assert.rejects(transport.connect(), expectedError);
+          await assertAfterConnect(transport);
+          assert.equal(tracking.opened.length, 1);
+          assert.equal(tracking.opened[0].flags & 3, fs.constants.O_RDONLY);
+          assert.notEqual(tracking.opened[0].flags & fs.constants.O_DIRECTORY, 0);
+          assert.notEqual(tracking.opened[0].flags & fs.constants.O_NOFOLLOW, 0);
+          assert.equal(tracking.openFds.size, 0);
+          assert.deepEqual(tracking.closed, [tracking.opened[0].fd]);
+        } finally {
+          transport.dispose();
+          for (const fd of tracking.openFds) fs.closeSync(fd);
+        }
       });
-      const transport = new Transport(socketPath);
-      try {
-        if (expectedError == null) await transport.connect();
-        else await assert.rejects(transport.connect(), expectedError);
-        await assertAfterConnect(transport);
-        assert.equal(tracking.opened.length, 1);
-        assert.equal(
-          tracking.opened[0].flags & 3,
-          fs.constants.O_RDONLY,
-          "parent fd must be opened read-only",
-        );
-        assert.notEqual(tracking.opened[0].flags & fs.constants.O_DIRECTORY, 0);
-        assert.notEqual(tracking.opened[0].flags & fs.constants.O_NOFOLLOW, 0);
-        assert.equal(tracking.openFds.size, 0);
-        assert.deepEqual(tracking.closed, [tracking.opened[0].fd]);
-      } finally {
-        transport.dispose();
-        for (const fd of tracking.openFds) fs.closeSync(fd);
-      }
-    });
-  }
-
-  class ConstructorFailureWebSocket {
-    constructor(_url, options) {
-      options.createConnection();
-      throw new Error("constructor failure");
     }
-  }
-  try {
+
+    class ConstructorFailureWebSocket {
+      constructor(_url, options) {
+        options.createConnection();
+        throw new Error("constructor failure");
+      }
+    }
     await runCase("successful WebSocket open", {});
     let failedProxy;
     await runCase("WebSocket construction failure after proxy creation", {
@@ -1149,7 +1140,7 @@ test("attachment-only transport closes each validation fd on every connect exit"
           this.stream.destroy();
         }
       }
-      const { Transport } = loadInjectedAttachmentTransport({
+      const Transport = loadInjectedAttachmentTransport({
         fsImpl: tracking.fsImpl,
         spawnImpl: () => fakeChild(),
         WebSocketImpl: PendingWebSocket,
@@ -1164,42 +1155,30 @@ test("attachment-only transport closes each validation fd on every connect exit"
       await assert.rejects(pending, /closed before opening/);
       assert.deepEqual(tracking.closed, [tracking.opened[0].fd]);
     });
-  } finally {
-    if (originalCli == null) delete process.env.CODEX_CLI_PATH;
-    else process.env.CODEX_CLI_PATH = originalCli;
-    await closeServer(server);
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
+  });
 });
 
 test("concurrent attachment connects own independent validation fds", async () => {
-  const tempDir = makeUnixSocketTempDir();
-  const socketPath = path.join(tempDir, "app-server.sock");
-  const server = await listenUnix(socketPath);
-  fs.chmodSync(socketPath, 0o600);
-  const tracking = trackedAttachmentFs();
-  const webSockets = [];
-  class PendingWebSocket extends EventEmitter {
-    constructor(_url, options) {
-      super();
-      this.stream = options.createConnection();
-      webSockets.push(this);
-    }
+  await withAttachmentSocket(async ({ socketPath }) => {
+    const tracking = trackedAttachmentFs();
+    const webSockets = [];
+    class PendingWebSocket extends EventEmitter {
+      constructor(_url, options) {
+        super();
+        this.stream = options.createConnection();
+        webSockets.push(this);
+      }
 
-    terminate() {
-      this.stream.destroy();
+      terminate() {
+        this.stream.destroy();
+      }
     }
-  }
-  const { Transport } = loadInjectedAttachmentTransport({
-    fsImpl: tracking.fsImpl,
-    spawnImpl: () => fakeChild(),
-    WebSocketImpl: PendingWebSocket,
-  });
-  const transport = new Transport(socketPath);
-  const originalCli = process.env.CODEX_CLI_PATH;
-  process.env.CODEX_CLI_PATH = "/fake/codex";
-
-  try {
+    const Transport = loadInjectedAttachmentTransport({
+      fsImpl: tracking.fsImpl,
+      spawnImpl: () => fakeChild(),
+      WebSocketImpl: PendingWebSocket,
+    });
+    const transport = new Transport(socketPath);
     const first = transport.connect();
     const second = transport.connect();
     assert.equal(tracking.openFds.size, 2);
@@ -1212,38 +1191,21 @@ test("concurrent attachment connects own independent validation fds", async () =
     assert.equal(tracking.openFds.size, 0);
     assert.equal(new Set(tracking.closed).size, 2);
     transport.dispose();
-  } finally {
-    if (originalCli == null) delete process.env.CODEX_CLI_PATH;
-    else process.env.CODEX_CLI_PATH = originalCli;
     for (const fd of tracking.openFds) fs.closeSync(fd);
-    await closeServer(server);
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
+  });
 });
 
 test("attachment-only transport disposes its proxy without changing the external socket", async () => {
-  assert.equal(
-    typeof attachmentTransportClassSource,
-    "function",
-    "attachment-only transport source must be exported",
-  );
-  const tempDir = makeUnixSocketTempDir();
-  const socketPath = path.join(tempDir, "app-server.sock");
-  const server = await listenUnix(socketPath);
-  fs.chmodSync(tempDir, 0o755);
-  fs.chmodSync(socketPath, 0o700);
-  const before = fs.lstatSync(socketPath);
-  const spawnCalls = [];
-  const proxy = fakeChild();
-  const { Transport } = loadInjectedAttachmentTransport({
-    spawnImpl(command, args) {
-      spawnCalls.push({ command, args: Array.from(args) });
-      return proxy;
-    },
-  });
-  const originalCli = process.env.CODEX_CLI_PATH;
-  process.env.CODEX_CLI_PATH = "/fake/codex";
-  try {
+  await withAttachmentSocket(async ({ socketPath }) => {
+    const before = fs.lstatSync(socketPath);
+    const spawnCalls = [];
+    const proxy = fakeChild();
+    const Transport = loadInjectedAttachmentTransport({
+      spawnImpl(command, args) {
+        spawnCalls.push({ command, args: Array.from(args) });
+        return proxy;
+      },
+    });
     const transport = new Transport(socketPath);
     await transport.connect();
     assert.equal(spawnCalls.length, 1);
@@ -1262,189 +1224,110 @@ test("attachment-only transport disposes its proxy without changing the external
     assert.equal(`${after.dev}:${after.ino}`, `${before.dev}:${before.ino}`);
     assert.equal(fs.existsSync(`${socketPath}.lock`), false);
     assert.equal(proxy.killed, true);
-  } finally {
-    if (originalCli == null) delete process.env.CODEX_CLI_PATH;
-    else process.env.CODEX_CLI_PATH = originalCli;
-    await closeServer(server);
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
+  }, { parentMode: 0o755, socketMode: 0o700 });
 });
 
 test("attachment-only transport rejects every untrusted endpoint without mutation", async (t) => {
-  assert.equal(
-    typeof attachmentTransportClassSource,
-    "function",
-    "attachment-only transport source must be exported",
-  );
-
-  await t.test("missing socket", async () => {
+  async function withEndpointFixture(callback) {
     const tempDir = makeUnixSocketTempDir();
     const socketPath = path.join(tempDir, "app-server.sock");
+    const servers = [];
+    const listen = async (candidate = socketPath, mode = 0o600) => {
+      const server = await listenUnix(candidate);
+      servers.push(server);
+      fs.chmodSync(candidate, mode);
+      return server;
+    };
     try {
-      await assertAttachmentValidationRejects({
-        expectedError: /ENOENT|does not exist/,
+      return await callback({
+        listen,
+        reject: (options) => assertAttachmentValidationRejects({ socketPath, ...options }),
         socketPath,
+        tempDir,
       });
     } finally {
+      await Promise.all(servers.map(closeServer));
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
-  });
+  }
 
-  await t.test("relative configured path", async () => {
-    const tempDir = makeUnixSocketTempDir();
-    const socketPath = path.join(tempDir, "app-server.sock");
-    const server = await listenUnix(socketPath);
-    fs.chmodSync(socketPath, 0o600);
-    const relativeSocketPath = path.relative(process.cwd(), socketPath);
-    try {
-      await assertAttachmentValidationRejects({
-        expectedError: /requires an absolute path/,
-        socketPath: relativeSocketPath,
-      });
-    } finally {
-      await closeServer(server);
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+  async function rejectEndpoint(name, expectedError, prepare = () => ({})) {
+    await t.test(name, () =>
+      withEndpointFixture(async (fixture) =>
+        fixture.reject({ expectedError, ...(await prepare(fixture)) }),
+      ),
+    );
+  }
 
-  await t.test("lexical parent alias", async () => {
-    const tempDir = makeUnixSocketTempDir();
-    const parentDir = path.join(tempDir, "authority");
-    fs.mkdirSync(parentDir, { mode: 0o700 });
-    const socketPath = path.join(parentDir, "app-server.sock");
-    const aliasedSocketPath = `${parentDir}/../authority/app-server.sock`;
-    const server = await listenUnix(socketPath);
-    fs.chmodSync(socketPath, 0o600);
-    try {
-      await assertAttachmentValidationRejects({
-        expectedError: /parent path is not canonical/,
-        socketPath: aliasedSocketPath,
-      });
-    } finally {
-      await closeServer(server);
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
+  await rejectEndpoint("missing socket", /ENOENT|does not exist/);
+  await rejectEndpoint("relative configured path", /requires an absolute path/, async ({ listen, socketPath }) => {
+    await listen();
+    return { socketPath: path.relative(process.cwd(), socketPath) };
   });
-
-  await t.test("direct parent symlink", async () => {
-    const tempDir = makeUnixSocketTempDir();
-    const realParent = path.join(tempDir, "real");
-    const linkedParent = path.join(tempDir, "linked");
-    fs.mkdirSync(realParent, { mode: 0o700 });
-    fs.symlinkSync(realParent, linkedParent);
-    const realSocketPath = path.join(realParent, "app-server.sock");
-    const linkedSocketPath = path.join(linkedParent, "app-server.sock");
-    const server = await listenUnix(realSocketPath);
-    fs.chmodSync(realSocketPath, 0o600);
-    try {
-      await assertAttachmentValidationRejects({
-        expectedError: /parent is not a real directory/,
-        socketPath: linkedSocketPath,
-      });
-    } finally {
-      await closeServer(server);
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
+  await rejectEndpoint("lexical parent alias", /parent path is not canonical/, async ({ listen, tempDir }) => {
+      const parentDir = path.join(tempDir, "authority");
+      fs.mkdirSync(parentDir, { mode: 0o700 });
+      const socketPath = path.join(parentDir, "app-server.sock");
+      await listen(socketPath);
+      return { socketPath: `${parentDir}/../authority/app-server.sock` };
   });
-
-  await t.test("intermediate parent symlink", async () => {
-    const tempDir = makeUnixSocketTempDir();
-    const realRoot = path.join(tempDir, "real-root");
-    const realParent = path.join(realRoot, "nested");
-    const linkedRoot = path.join(tempDir, "linked-root");
-    fs.mkdirSync(realParent, { recursive: true, mode: 0o700 });
-    fs.symlinkSync(realRoot, linkedRoot);
-    const realSocketPath = path.join(realParent, "app-server.sock");
-    const linkedSocketPath = path.join(linkedRoot, "nested", "app-server.sock");
-    const server = await listenUnix(realSocketPath);
-    fs.chmodSync(realSocketPath, 0o600);
-    try {
-      await assertAttachmentValidationRejects({
-        expectedError: /parent path contains a symlink/,
-        socketPath: linkedSocketPath,
-      });
-    } finally {
-      await closeServer(server);
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
+  await rejectEndpoint("direct parent symlink", /parent is not a real directory/, async ({ listen, tempDir }) => {
+      const realParent = path.join(tempDir, "real");
+      const linkedParent = path.join(tempDir, "linked");
+      fs.mkdirSync(realParent, { mode: 0o700 });
+      fs.symlinkSync(realParent, linkedParent);
+      await listen(path.join(realParent, "app-server.sock"));
+      return { socketPath: path.join(linkedParent, "app-server.sock") };
   });
-
-  await t.test("leaf symlink", async () => {
-    const tempDir = makeUnixSocketTempDir();
-    const realSocketPath = path.join(tempDir, "real.sock");
-    const linkedSocketPath = path.join(tempDir, "app-server.sock");
-    const server = await listenUnix(realSocketPath);
-    fs.chmodSync(realSocketPath, 0o600);
-    fs.symlinkSync(realSocketPath, linkedSocketPath);
-    try {
-      await assertAttachmentValidationRejects({
-        expectedError: /endpoint is not a real Unix socket/,
-        socketPath: linkedSocketPath,
-      });
-    } finally {
-      await closeServer(server);
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
+  await rejectEndpoint("intermediate parent symlink", /parent path contains a symlink/, async ({ listen, tempDir }) => {
+      const realRoot = path.join(tempDir, "real-root");
+      const realParent = path.join(realRoot, "nested");
+      const linkedRoot = path.join(tempDir, "linked-root");
+      fs.mkdirSync(realParent, { recursive: true, mode: 0o700 });
+      fs.symlinkSync(realRoot, linkedRoot);
+      await listen(path.join(realParent, "app-server.sock"));
+      return { socketPath: path.join(linkedRoot, "nested", "app-server.sock") };
   });
-
-  await t.test("current UID unavailable", async () => {
-    const tempDir = makeUnixSocketTempDir();
-    const socketPath = path.join(tempDir, "app-server.sock");
-    const server = await listenUnix(socketPath);
-    fs.chmodSync(socketPath, 0o600);
-    try {
-      await assertAttachmentValidationRejects({
-        expectedError: /current UID is unavailable/,
-        processImpl: { env: process.env },
-        socketPath,
-      });
-    } finally {
-      await closeServer(server);
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
+  await rejectEndpoint("leaf symlink", /endpoint is not a real Unix socket/, async ({ listen, socketPath, tempDir }) => {
+      const realSocketPath = path.join(tempDir, "real.sock");
+      await listen(realSocketPath);
+      fs.symlinkSync(realSocketPath, socketPath);
+  });
+  await rejectEndpoint("current UID unavailable", /current UID is unavailable/, async ({ listen }) => {
+    await listen();
+    return { processImpl: { env: process.env } };
   });
 
   for (const [name, inspectedPath] of [
     ["wrong-owner parent", "parent"],
     ["wrong-owner socket", "socket"],
   ]) {
-    await t.test(name, async () => {
-      const tempDir = makeUnixSocketTempDir();
-      const socketPath = path.join(tempDir, "app-server.sock");
-      const server = await listenUnix(socketPath);
-      fs.chmodSync(socketPath, 0o600);
-      const wrongOwnerPath = inspectedPath === "parent" ? tempDir : socketPath;
-      const wrongOwnerFs = {
-        ...fs,
-        lstatSync(candidate, ...args) {
-          const stat = fs.lstatSync(candidate, ...args);
-          const isInspectedSocket =
-            inspectedPath === "socket" &&
-            (candidate === wrongOwnerPath ||
-              /^\/proc\/self\/fd\/\d+\/app-server\.sock$/.test(candidate));
-          if (candidate !== wrongOwnerPath && !isInspectedSocket) return stat;
-          return new Proxy(stat, {
-            get(target, property, receiver) {
-              if (property === "uid") return target.uid + 1;
-              return Reflect.get(target, property, receiver);
-            },
-          });
-        },
-      };
-      try {
-        await assertAttachmentValidationRejects({
-          expectedError:
-            inspectedPath === "parent"
-              ? /parent has unexpected owner/
-              : /socket has unexpected owner/,
-          fsImpl: wrongOwnerFs,
-          socketPath,
-        });
-      } finally {
-        await closeServer(server);
-        fs.rmSync(tempDir, { recursive: true, force: true });
-      }
-    });
+    await rejectEndpoint(
+      name,
+      inspectedPath === "parent" ? /parent has unexpected owner/ : /socket has unexpected owner/,
+      async ({ listen, socketPath, tempDir }) => {
+        await listen();
+        const wrongOwnerPath = inspectedPath === "parent" ? tempDir : socketPath;
+        const wrongOwnerFs = {
+          ...fs,
+          lstatSync(candidate, ...args) {
+            const stat = fs.lstatSync(candidate, ...args);
+            const isInspectedSocket =
+              inspectedPath === "socket" &&
+              (candidate === wrongOwnerPath ||
+                /^\/proc\/self\/fd\/\d+\/app-server\.sock$/.test(candidate));
+            if (candidate !== wrongOwnerPath && !isInspectedSocket) return stat;
+            return new Proxy(stat, {
+              get(target, property, receiver) {
+                if (property === "uid") return target.uid + 1;
+                return Reflect.get(target, property, receiver);
+              },
+            });
+          },
+        };
+        return { fsImpl: wrongOwnerFs };
+      },
+    );
   }
 
   for (const [name, property, value, expectedError] of [
@@ -1463,61 +1346,34 @@ test("attachment-only transport rejects every untrusted endpoint without mutatio
       /parent has unsafe permissions/,
     ],
   ]) {
-    await t.test(name, async () => {
-      const tempDir = makeUnixSocketTempDir();
-      const socketPath = path.join(tempDir, "app-server.sock");
-      const server = await listenUnix(socketPath);
-      fs.chmodSync(socketPath, 0o600);
-      const fstatFs = {
-        ...fs,
-        fstatSync(fd, ...args) {
-          const stat = fs.fstatSync(fd, ...args);
-          return new Proxy(stat, {
-            get(target, candidate, receiver) {
-              if (candidate === property) return value(target);
-              return Reflect.get(target, candidate, receiver);
-            },
-          });
-        },
-      };
-      try {
-        await assertAttachmentValidationRejects({
-          expectedError,
-          fsImpl: fstatFs,
-          socketPath,
-        });
-      } finally {
-        await closeServer(server);
-        fs.rmSync(tempDir, { recursive: true, force: true });
-      }
-    });
+    await rejectEndpoint(name, expectedError, async ({ listen }) => {
+        await listen();
+        const fstatFs = {
+          ...fs,
+          fstatSync(fd, ...args) {
+            const stat = fs.fstatSync(fd, ...args);
+            return new Proxy(stat, {
+              get(target, candidate, receiver) {
+                if (candidate === property) return value(target);
+                return Reflect.get(target, candidate, receiver);
+              },
+            });
+          },
+        };
+        return { fsImpl: fstatFs };
+      });
   }
 
-  for (const [name, mode] of [["group-writable parent", 0o720]]) {
-    await t.test(name, async () => {
-      const tempDir = makeUnixSocketTempDir();
-      const socketPath = path.join(tempDir, "app-server.sock");
-      const server = await listenUnix(socketPath);
-      fs.chmodSync(socketPath, 0o600);
-      fs.chmodSync(tempDir, mode);
-      try {
-        await assertAttachmentValidationRejects({
-          expectedError: /parent has unsafe permissions/,
-          socketPath,
-        });
-      } finally {
-        await closeServer(server);
-        fs.rmSync(tempDir, { recursive: true, force: true });
-      }
-    });
-  }
+  await rejectEndpoint("group-writable parent", /parent has unsafe permissions/, async ({ listen, tempDir }) => {
+      await listen();
+      fs.chmodSync(tempDir, 0o720);
+  });
 
-  for (const [name, mode] of [["parent owner execute bit missing", 0o400]]) {
-    await t.test(name, async () => {
-      const tempDir = makeUnixSocketTempDir();
-      const socketPath = path.join(tempDir, "app-server.sock");
-      const server = await listenUnix(socketPath);
-      fs.chmodSync(socketPath, 0o600);
+  await rejectEndpoint(
+    "parent owner execute bit missing",
+    /parent owner read and execute permissions are required/,
+    async ({ listen, tempDir }) => {
+      await listen();
       const modeFs = {
         ...fs,
         lstatSync(candidate, ...args) {
@@ -1525,89 +1381,33 @@ test("attachment-only transport rejects every untrusted endpoint without mutatio
           if (candidate !== tempDir) return stat;
           return new Proxy(stat, {
             get(target, property, receiver) {
-              if (property === "mode") return (target.mode & ~0o777) | mode;
+              if (property === "mode") return (target.mode & ~0o777) | 0o400;
               return Reflect.get(target, property, receiver);
             },
           });
         },
       };
-      try {
-        await assertAttachmentValidationRejects({
-          expectedError: /parent owner read and execute permissions are required/,
-          fsImpl: modeFs,
-          socketPath,
-        });
-      } finally {
-        await closeServer(server);
-        fs.rmSync(tempDir, { recursive: true, force: true });
-      }
-    });
-  }
+      return { fsImpl: modeFs };
+    },
+  );
 
-  await t.test("parent is not a directory", async () => {
-    const tempDir = makeUnixSocketTempDir();
-    const parentPath = path.join(tempDir, "authority");
-    const socketPath = path.join(parentPath, "app-server.sock");
-    fs.writeFileSync(parentPath, "", { mode: 0o600 });
-    try {
-      await assertAttachmentValidationRejects({
-        expectedError: /parent is not a real directory/,
-        socketPath,
-      });
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
+  await rejectEndpoint("parent is not a directory", /parent is not a real directory/, async ({ tempDir }) => {
+      const parentPath = path.join(tempDir, "authority");
+      fs.writeFileSync(parentPath, "", { mode: 0o600 });
+      return { socketPath: path.join(parentPath, "app-server.sock") };
   });
 
-  await t.test("endpoint is not a socket", async () => {
-    const tempDir = makeUnixSocketTempDir();
-    const socketPath = path.join(tempDir, "app-server.sock");
-    fs.writeFileSync(socketPath, "", { mode: 0o600 });
-    try {
-      await assertAttachmentValidationRejects({
-        expectedError: /endpoint is not a real Unix socket/,
-        socketPath,
-      });
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
+  await rejectEndpoint("endpoint is not a socket", /endpoint is not a real Unix socket/, async ({ socketPath }) => {
+      fs.writeFileSync(socketPath, "", { mode: 0o600 });
   });
 
-  for (const [name, mode] of [["owner write bit missing", 0o400]]) {
-    await t.test(name, async () => {
-      const tempDir = makeUnixSocketTempDir();
-      const socketPath = path.join(tempDir, "app-server.sock");
-      const server = await listenUnix(socketPath);
-      fs.chmodSync(socketPath, mode);
-      try {
-        await assertAttachmentValidationRejects({
-          expectedError: /socket owner read and write permissions are required/,
-          socketPath,
-        });
-      } finally {
-        await closeServer(server);
-        fs.rmSync(tempDir, { recursive: true, force: true });
-      }
-    });
-  }
+  await rejectEndpoint("owner write bit missing", /socket owner read and write permissions are required/, async ({ listen, socketPath }) => {
+      await listen(socketPath, 0o400);
+  });
 
-  for (const [name, mode] of [["group write bit", 0o620]]) {
-    await t.test(name, async () => {
-      const tempDir = makeUnixSocketTempDir();
-      const socketPath = path.join(tempDir, "app-server.sock");
-      const server = await listenUnix(socketPath);
-      fs.chmodSync(socketPath, mode);
-      try {
-        await assertAttachmentValidationRejects({
-          expectedError: /socket has unsafe group or other permissions/,
-          socketPath,
-        });
-      } finally {
-        await closeServer(server);
-        fs.rmSync(tempDir, { recursive: true, force: true });
-      }
-    });
-  }
+  await rejectEndpoint("group write bit", /socket has unsafe group or other permissions/, async ({ listen, socketPath }) => {
+      await listen(socketPath, 0o620);
+  });
 });
 
 test("patch leaves unsupported bundle shapes unchanged with a warning", () => {

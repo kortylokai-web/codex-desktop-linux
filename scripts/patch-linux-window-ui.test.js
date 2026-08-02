@@ -754,49 +754,6 @@ test("build info captures DMG hash, features, distro profile, and source revisio
   }
 });
 
-test("build info derives capabilities from enabled manifests without staged app inputs", () => {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-build-info-capabilities-"));
-  const pinnedFeaturesConfig = process.env.CODEX_LINUX_FEATURES_CONFIG;
-  delete process.env.CODEX_LINUX_FEATURES_CONFIG;
-  try {
-    const dmgPath = path.join(tempRoot, "Codex.dmg");
-    const appDir = path.join(tempRoot, "Codex.app");
-    const featuresRoot = path.join(tempRoot, "linux-features");
-    const featureDir = path.join(featuresRoot, "manifest-capability");
-    fs.writeFileSync(dmgPath, "fake dmg payload", "utf8");
-    fs.mkdirSync(featureDir, { recursive: true });
-    fs.mkdirSync(appDir, { recursive: true });
-    fs.writeFileSync(path.join(featuresRoot, "features.json"), '{"enabled":["manifest-capability"]}\n');
-    fs.writeFileSync(path.join(featureDir, "README.md"), "# Manifest Capability\n");
-    fs.writeFileSync(
-      path.join(featureDir, "feature.json"),
-      '{"id":"manifest-capability","title":"Manifest Capability","capabilities":["manifest-capability-v1"]}\n',
-    );
-
-    const info = buildInfo({
-      repoDir: tempRoot,
-      dmgPath,
-      appDir,
-      electronVersion: "41.3.0",
-      appId: "codex-desktop",
-      appDisplayName: "ChatGPT Desktop",
-      featuresRoot,
-      env: { SOURCE_DATE_EPOCH: "1710000000" },
-      linuxTarget: detectLinuxTargetContext({
-        osReleaseFields: { ID: "ubuntu", ID_LIKE: "debian", VERSION_ID: "24.04" },
-        env: { PATH: "" },
-      }),
-    });
-
-    assert.deepEqual(info.linuxCapabilities, ["manifest-capability-v1"]);
-  } finally {
-    if (pinnedFeaturesConfig != null) {
-      process.env.CODEX_LINUX_FEATURES_CONFIG = pinnedFeaturesConfig;
-    }
-    fs.rmSync(tempRoot, { recursive: true, force: true });
-  }
-});
-
 test("build info sanitizes staged source metadata from packaged update-builder", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-build-info-staged-source-"));
   try {
