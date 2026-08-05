@@ -393,7 +393,7 @@ function syntheticBundle() {
   return [
     "var Ky=class{options;kind=`websocket`;logger=r.i(`AppServerTransportSshWebsocket`);proxyStreams=new Set;supportsReconnect(){return!0}",
     "async connect(){let t={current:null},r=new n.zn(Fy,{perMessageDeflate:!1,createConnection:()=>",
-    "(t.current=this.createSshProxyStream(),t.current)});return n.Ln(r,{onPongTimeout:()=>r.terminate()}),new n.Rn(r)}};",
+    "(t.current=this.createSshProxyStream(),t.current)});return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.hasConnected=!0,new n.Rn(r)}};",
     "function n6(e){let t=Jy(e.hostConfig);if(t)return Z.info(`selected app-server transport`),new Ky(t);",
     "if(e.transportKind===`remote-control`)return new Remote(e);",
     "if(n.io(e.hostConfig))return new Wsl({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator});",
@@ -887,25 +887,28 @@ test("socket hook clears stale fatal state for explicitly configured development
   }
 });
 
-test("patch accepts the additional supported SSH transport lifecycle", () => {
-  const directLifecycle =
-    "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),new n.Rn(r)";
-  const source = syntheticBundle().replace(
-    directLifecycle,
-    "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.hasConnected=!0,new n.Rn(r)",
-  );
+test("patch accepts only the current SSH transport lifecycle", () => {
+  const source = syntheticBundle();
   const patched = applyExternalAppServerAttachmentPatch(source);
 
   assert.notEqual(patched, source);
 });
 
+test("patch rejects the obsolete no-hasConnected SSH transport lifecycle", () => {
+  const source = syntheticBundle().replace("this.hasConnected=!0,", "");
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    assert.equal(applyExternalAppServerAttachmentPatch(source), source);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.match(warnings.join("\n"), /SSH WebSocket transport/);
+});
+
 test("patch rejects ambiguous SSH transport lifecycles", () => {
-  const directLifecycle =
-    "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),new n.Rn(r)";
-  const connectedLifecycle =
-    "return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.hasConnected=!0,new n.Rn(r)";
-  const connectedSource = syntheticBundle().replace(directLifecycle, connectedLifecycle);
-  const source = connectedSource.replace(
+  const source = syntheticBundle().replace(
     "new n.Rn(r)}};",
     "new n.Rn(r)}duplicate(){return n.Ln(r,{onPongTimeout:()=>r.terminate()}),this.hasConnected=!0,new n.Rn(r)}};",
   );
