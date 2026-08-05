@@ -170,31 +170,6 @@ async function waitForSocket(socketPath, child, readStderr = () => "") {
   throw new Error("timed out waiting for the app-server socket");
 }
 
-async function readWebSocketUpgrade(child) {
-  const chunks = [];
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(
-      () => reject(new Error("timed out waiting for WebSocket upgrade")),
-      5000,
-    );
-    const finish = (error, value) => {
-      clearTimeout(timeout);
-      child.stdout.off("data", onData);
-      child.off("error", onError);
-      if (error) reject(error);
-      else resolve(value);
-    };
-    const onError = (error) => finish(error);
-    const onData = (chunk) => {
-      chunks.push(chunk);
-      const response = Buffer.concat(chunks).toString("utf8");
-      if (response.includes("\r\n\r\n")) finish(null, response);
-    };
-    child.stdout.on("data", onData);
-    child.once("error", onError);
-  });
-}
-
 async function stopChild(child) {
   if (child == null || child.exitCode != null || child.signalCode != null) return;
   const closed = new Promise((resolve) => child.once("close", resolve));
@@ -1102,7 +1077,7 @@ test("patch makes the fatal marker win before every transport branch", async (t)
   );
 });
 
-test("attachment-only transport inode-binds the validated parent across a path swap", async () => {
+test("attachment-only transport passes only the basename through the validated parent cwd", async () => {
   const tempDir = makeUnixSocketTempDir();
   const parentDir = path.join(tempDir, "authority");
   const heldParentDir = path.join(tempDir, "authority-held");
@@ -1129,11 +1104,16 @@ test("attachment-only transport inode-binds the validated parent across a path s
   const proxy = fakeChild();
   let spawnedSocketPath = null;
   let spawnedSocketIdentity = null;
+  let spawnedCwd = null;
+  let spawnedCwdIdentity = null;
   const Transport = loadInjectedAttachmentTransport({
     fsImpl: tracking.fsImpl,
-    spawnImpl(_command, args) {
+    spawnImpl(_command, args, options) {
       spawnedSocketPath = args.at(-1);
-      spawnedSocketIdentity = pathIdentity(spawnedSocketPath);
+      spawnedCwd = options.cwd;
+      spawnedSocketIdentity = pathIdentity(path.join(spawnedCwd, spawnedSocketPath));
+      const stat = fs.statSync(spawnedCwd);
+      spawnedCwdIdentity = { dev: stat.dev, ino: stat.ino };
       return proxy;
     },
   });
@@ -1144,11 +1124,12 @@ test("attachment-only transport inode-binds the validated parent across a path s
     const transport = new Transport(socketPath);
     await transport.connect();
     assert.equal(swapped, true, "test must replace the configured parent after its fd is bound");
-    assert.match(
-      spawnedSocketPath,
-      new RegExp(`^/proc/${process.pid}/fd/\\d+/app-server\\.sock$`),
-    );
+    assert.equal(spawnedSocketPath, "app-server.sock");
+    assert.equal(spawnedSocketPath.includes("/proc/"), false);
+    assert.match(spawnedCwd, new RegExp(`^/proc/${process.pid}/fd/\\d+$`));
     assert.deepEqual(spawnedSocketIdentity, originalIdentity);
+    const heldParentStat = fs.statSync(heldParentDir);
+    assert.deepEqual(spawnedCwdIdentity, { dev: heldParentStat.dev, ino: heldParentStat.ino });
     assert.deepEqual(pathIdentity(socketPath), replacementIdentity);
     assert.equal(tracking.openFds.size, 0, "validation fd must close after WebSocket open");
     assert.equal(fs.existsSync(`${socketPath}.lock`), false);
@@ -1339,8 +1320,8 @@ test("attachment-only transport disposes its proxy without changing the external
     const spawnCalls = [];
     const proxy = fakeChild();
     const Transport = loadInjectedAttachmentTransport({
-      spawnImpl(command, args) {
-        spawnCalls.push({ command, args: Array.from(args) });
+      spawnImpl(command, args, options) {
+        spawnCalls.push({ command, args: Array.from(args), cwd: options.cwd });
         return proxy;
       },
     });
@@ -1348,11 +1329,8 @@ test("attachment-only transport disposes its proxy without changing the external
     await transport.connect();
     assert.equal(spawnCalls.length, 1);
     assert.equal(spawnCalls[0].command, "/fake/codex");
-    assert.deepEqual(spawnCalls[0].args.slice(0, -1), ["app-server", "proxy", "--sock"]);
-    assert.match(
-      spawnCalls[0].args.at(-1),
-      new RegExp(`^/proc/${process.pid}/fd/\\d+/app-server\\.sock$`),
-    );
+    assert.deepEqual(spawnCalls[0].args, ["app-server", "proxy", "--sock", "app-server.sock"]);
+    assert.match(spawnCalls[0].cwd, new RegExp(`^/proc/${process.pid}/fd/\\d+$`));
 
     const proxyClosed = once(proxy, "close");
     transport.dispose();
@@ -1599,7 +1577,7 @@ test("socket environment hook shell syntax is valid", () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("real Codex proxy attaches through the Desktop parent-PID proc fd path", { timeout: 15000 }, async (t) => {
+test("real Codex proxy uses a basename through the validated parent after configured-path replacement", { timeout: 20000 }, async (t) => {
   const codexCli = process.env.CODEX_CLI_PATH;
   if (codexCli == null) {
     t.skip("set CODEX_CLI_PATH to run the real Codex app-server integration test");
@@ -1608,37 +1586,34 @@ test("real Codex proxy attaches through the Desktop parent-PID proc fd path", { 
 
   const tempDir = makeUnixSocketTempDir();
   const codexHome = path.join(tempDir, "codex-home");
-  const socketPath = path.join(tempDir, "authority", "app-server.sock");
-  const parentDir = path.dirname(socketPath);
-  const binDir = path.join(tempDir, "bin");
-  const wrapperPath = path.join(binDir, "codex");
+  const socketBasename = "app-server.sock";
+  const parentNameBytes =
+    unixSocketPathMaxBytes - Buffer.byteLength(tempDir) - Buffer.byteLength(socketBasename) - 2;
+  assert.ok(parentNameBytes > 0, "test temp path must leave room for a near-limit parent name");
+  const parentDir = path.join(tempDir, "p".repeat(parentNameBytes));
+  const heldParentDir = path.join(tempDir, "h".repeat(parentNameBytes));
+  const replacementDir = path.join(tempDir, "replacement");
+  const socketPath = path.join(parentDir, socketBasename);
+  const replacementSocketPath = path.join(replacementDir, socketBasename);
   fs.mkdirSync(codexHome, { mode: 0o700 });
   fs.mkdirSync(parentDir, { mode: 0o700 });
-  fs.mkdirSync(binDir, { mode: 0o700 });
-  const parentFd = fs.openSync(
-    parentDir,
-    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
-  );
-  const procSocketPath = `/proc/${process.pid}/fd/${parentFd}/${path.basename(socketPath)}`;
-  fs.writeFileSync(
-    wrapperPath,
-    [
-      "#!/usr/bin/env bash",
-      "set -eu",
-      'if [ "$#" -eq 2 ] && [ "$1" = "app-server" ] && [ "$2" = "proxy" ]; then',
-      '  exec "$REAL_CODEX" app-server proxy --sock "$DESKTOP_SOCKET"',
-      "fi",
-      'exec "$REAL_CODEX" "$@"',
-      "",
-    ].join("\n"),
-    { mode: 0o700 },
-  );
+  fs.mkdirSync(replacementDir, { mode: 0o700 });
+  assert.equal(Buffer.byteLength(socketPath), unixSocketPathMaxBytes);
+
+  let replacementConnections = 0;
+  const replacementServer = net.createServer(() => {
+    replacementConnections += 1;
+  });
+  await new Promise((resolve, reject) => {
+    replacementServer.once("error", reject);
+    replacementServer.listen(replacementSocketPath, resolve);
+  });
+  fs.chmodSync(replacementSocketPath, 0o600);
+
   const env = {
     ...process.env,
     CODEX_HOME: codexHome,
-    DESKTOP_SOCKET: procSocketPath,
-    PATH: `${binDir}:${process.env.PATH}`,
-    REAL_CODEX: codexCli,
+    CODEX_CLI_PATH: codexCli,
   };
   assertUnixSocketPath(socketPath);
   const authority = spawn(codexCli, ["app-server", "--listen", `unix://${socketPath}`], {
@@ -1646,7 +1621,8 @@ test("real Codex proxy attaches through the Desktop parent-PID proc fd path", { 
     stdio: ["ignore", "ignore", "pipe"],
   });
   const readAuthorityStderr = captureBoundedStderr(authority.stderr);
-  let proxy;
+  let proxy = null;
+  let transport = null;
 
   try {
     await waitForSocket(socketPath, authority, readAuthorityStderr);
@@ -1655,31 +1631,94 @@ test("real Codex proxy attaches through the Desktop parent-PID proc fd path", { 
       0,
       "app-server socket must not grant group/other access",
     );
-    assert.deepEqual(pathIdentity(procSocketPath), pathIdentity(socketPath));
-
-    proxy = spawn("bash", ["-c", "codex app-server proxy"], {
-      env,
-      stdio: ["pipe", "pipe", "ignore"],
+    const originalParentStat = fs.statSync(parentDir);
+    const originalSocketIdentity = pathIdentity(socketPath);
+    const replacementSocketIdentity = pathIdentity(replacementSocketPath);
+    let swapped = false;
+    const tracking = trackedAttachmentFs({
+      afterFstat() {
+        if (swapped) return;
+        fs.renameSync(parentDir, heldParentDir);
+        fs.renameSync(replacementDir, parentDir);
+        swapped = true;
+      },
     });
-    const responsePromise = readWebSocketUpgrade(proxy);
-    proxy.stdin.end(
-      [
-        "GET /rpc HTTP/1.1",
-        "Host: localhost",
-        "Upgrade: websocket",
-        "Connection: Upgrade",
-        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
-        "Sec-WebSocket-Version: 13",
-        "",
-        "",
-      ].join("\r\n"),
+    let proxyArgs = null;
+    let proxyCwd = null;
+    class UpgradeWebSocket extends EventEmitter {
+      constructor(_url, options) {
+        super();
+        this.stream = options.createConnection();
+        this.response = "";
+        this.stream.on("data", (chunk) => {
+          this.response += chunk.toString("utf8");
+          if (!this.response.includes("\r\n\r\n")) return;
+          if (/^HTTP\/1\.1 101 /.test(this.response)) this.emit("open");
+          else this.emit("error", new Error(`unexpected proxy response: ${this.response}`));
+        });
+        this.stream.once("error", (error) => this.emit("error", error));
+        queueMicrotask(() => {
+          this.stream.write(
+            [
+              "GET /rpc HTTP/1.1",
+              "Host: localhost",
+              "Upgrade: websocket",
+              "Connection: Upgrade",
+              "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+              "Sec-WebSocket-Version: 13",
+              "",
+              "",
+            ].join("\r\n"),
+          );
+        });
+      }
+
+      terminate() {
+        this.stream.destroy();
+      }
+    }
+    const processImpl = {
+      env,
+      getuid: process.getuid.bind(process),
+      pid: process.pid,
+    };
+    const Transport = loadInjectedAttachmentTransport({
+      fsImpl: tracking.fsImpl,
+      processImpl,
+      spawnImpl(command, args, options) {
+        proxyArgs = [...args];
+        proxyCwd = options.cwd;
+        assert.equal(tracking.openFds.size, 1, "validation fd must remain open until child startup");
+        proxy = spawn(command, args, options);
+        return proxy;
+      },
+      WebSocketImpl: UpgradeWebSocket,
+    });
+    transport = new Transport(socketPath);
+    const adapter = await transport.connect();
+
+    assert.equal(swapped, true, "test must replace the configured parent after validation");
+    assert.deepEqual(proxyArgs, ["app-server", "proxy", "--sock", socketBasename]);
+    assert.equal(proxyArgs.at(-1).includes("/proc/"), false);
+    assert.match(proxyCwd, new RegExp(`^/proc/${process.pid}/fd/\\d+$`));
+    const proxyProcessCwdStat = fs.statSync(`/proc/${proxy.pid}/cwd`);
+    assert.deepEqual(
+      { dev: proxyProcessCwdStat.dev, ino: proxyProcessCwdStat.ino },
+      { dev: originalParentStat.dev, ino: originalParentStat.ino },
     );
-    const response = await responsePromise;
-    assert.match(response, /^HTTP\/1\.1 101 /);
-    assert.match(response.toLowerCase(), /upgrade: websocket/);
+    assert.match(
+      fs.readFileSync(`/proc/${proxy.pid}/cmdline`, "utf8"),
+      /--sock\u0000app-server\.sock\u0000/,
+    );
+    assert.deepEqual(pathIdentity(path.join(heldParentDir, socketBasename)), originalSocketIdentity);
+    assert.deepEqual(pathIdentity(socketPath), replacementSocketIdentity);
+    assert.match(adapter.socket.response, /^HTTP\/1\.1 101 /);
+    assert.equal(replacementConnections, 0);
+    assert.equal(tracking.openFds.size, 0, "validation fd must close after child startup and WebSocket open");
   } finally {
+    transport?.dispose();
     await Promise.all([stopChild(proxy), stopChild(authority)]);
-    fs.closeSync(parentFd);
+    await closeServer(replacementServer);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
