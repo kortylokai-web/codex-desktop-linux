@@ -24,6 +24,8 @@ The descriptor must be a regular `0600` file owned by the current Linux UID. Its
 
 The selected socket must have a canonical, symlink-free parent owned by the current user, with owner read and execute access and no group or other write access. The endpoint itself must be a real Unix socket owned by the current user, with owner read and write access and no group or other permissions. Any failed trust check stops attachment without fallback.
 
-Explicit environment values take precedence and bypass descriptor reading. An absent descriptor emits no routing and allows ordinary startup. A present but invalid descriptor fails the hook with one safe diagnostic and emits no routing. A valid descriptor selects strict attach-only mode: if the external endpoint cannot be trusted or reached, Desktop fails instead of falling back to another transport.
+Explicit environment values take precedence and bypass descriptor reading. An absent descriptor emits no routing and allows ordinary startup. A present malformed, unsafe, unreadable, or unsupported descriptor fails closed before ordinary transport selection, emits one safe diagnostic, and contributes no routing. A valid descriptor selects strict attach-only mode: if the external endpoint cannot be trusted or reached, Desktop fails instead of falling back to another transport.
 
 Desktop never starts, stops, locks, reclaims, unlinks, or otherwise mutates the external socket or app-server. The external supervisor remains the sole lifecycle owner.
+
+Agentlehub maintains the downstream `external-app-server-attachment-descriptor-v1` capability because Codex Session Control uses launcher compatibility discovery.

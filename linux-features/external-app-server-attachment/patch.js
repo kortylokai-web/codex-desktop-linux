@@ -4,7 +4,7 @@ const IDENT = "[A-Za-z_$][\\w$]*";
 const PATCH_SENTINEL = "/*codex-linux:external-app-server-attachment:v1*/";
 const ATTACHMENT_CLASS = "class CodexLinuxExternalAppServerSocketTransport";
 const ATTACHMENT_SELECTOR =
-  "if(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY===`1`){if(e.hostConfig.kind!==`local`)throw Error(`external app-server socket mode requires a local host`);if(!process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)throw Error(`external app-server socket mode requires CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET`);return new CodexLinuxExternalAppServerSocketTransport(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)}";
+  "if(process.env.CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL===`1`)throw Error(`external app-server attachment descriptor selection failed`);if(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY===`1`){if(e.hostConfig.kind!==`local`)throw Error(`external app-server socket mode requires a local host`);if(!process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)throw Error(`external app-server socket mode requires CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET`);return new CodexLinuxExternalAppServerSocketTransport(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)}";
 
 function findTransportSymbols(source) {
   const classMatch = source.match(

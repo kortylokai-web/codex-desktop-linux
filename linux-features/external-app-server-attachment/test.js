@@ -108,6 +108,7 @@ function hookEnvironment(tree) {
   };
   delete env.CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY;
   delete env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET;
+  delete env.CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL;
   return env;
 }
 
@@ -487,6 +488,69 @@ test("descriptor reader treats only an absent descriptor as an ordinary no-op", 
   });
 });
 
+test("descriptor reader fails closed when a present descriptor cannot be opened", () => {
+  const reader = loadDescriptorReader();
+  withDescriptorTree((tree) => {
+    writeDescriptor(tree.descriptorPath, descriptorSource("/tmp/reader-eacces.sock"));
+    const originalLstat = fs.lstatSync;
+    const originalOpen = fs.openSync;
+    let descriptorPresenceEstablished = false;
+    fs.lstatSync = (candidate, ...args) => {
+      const stat = originalLstat(candidate, ...args);
+      if (candidate === tree.descriptorPath) descriptorPresenceEstablished = true;
+      return stat;
+    };
+    fs.openSync = (candidate, ...args) => {
+      if (candidate === tree.descriptorPath && descriptorPresenceEstablished) {
+        const error = new Error("permission denied");
+        error.code = "EACCES";
+        throw error;
+      }
+      return originalOpen(candidate, ...args);
+    };
+    try {
+      assert.throws(
+        () => reader.readAttachmentDescriptor(tree.descriptorPath),
+        /attachment descriptor could not be read safely/i,
+      );
+      assert.equal(descriptorPresenceEstablished, true, "test must establish descriptor presence first");
+    } finally {
+      fs.lstatSync = originalLstat;
+      fs.openSync = originalOpen;
+    }
+  });
+});
+
+test("socket hook marks an injected present-descriptor EACCES fatal without routing or disclosure", () => {
+  withDescriptorTree((tree) => {
+    writeDescriptor(tree.descriptorPath, descriptorSource("/tmp/reader-eacces.sock"));
+    const preloadPath = path.join(tree.root, "inject-reader-eacces.js");
+    fs.writeFileSync(
+      preloadPath,
+      [
+        "const fs=require('node:fs');",
+        "const descriptorPath=process.argv[2];",
+        "const lstatSync=fs.lstatSync;",
+        "const openSync=fs.openSync;",
+        "let present=false;",
+        "fs.lstatSync=(candidate,...args)=>{const stat=lstatSync(candidate,...args);if(candidate===descriptorPath)present=true;return stat};",
+        "fs.openSync=(candidate,...args)=>{if(candidate===descriptorPath&&present){const error=Error('permission denied');error.code='EACCES';throw error}return openSync(candidate,...args)};",
+      ].join(""),
+      { mode: 0o600 },
+    );
+    const result = spawnSync(socketEnvHook, [], {
+      encoding: "utf8",
+      env: { ...hookEnvironment(tree), NODE_OPTIONS: `--require=${preloadPath}` },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "env CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL=1\n");
+    assert.equal(result.stderr, "ERROR: app-server attachment descriptor could not be read safely.\n");
+    for (const forbidden of [tree.descriptorPath, tree.root, "reader-eacces.sock", "permission denied"]) {
+      assert.equal(result.stderr.includes(forbidden), false, `diagnostic leaked ${forbidden}`);
+    }
+  });
+});
+
 test("descriptor reader rejects schema and socket-path violations", async (t) => {
   const cases = [
     ["non-object", "[]"],
@@ -720,14 +784,17 @@ test("descriptor reader rejects same-inode mutation during the descriptor read",
   });
 });
 
-test("socket hook routes nothing when the descriptor is absent", () => {
+test("socket hook clears stale fatal state without routing when the descriptor is absent", () => {
   withDescriptorTree((tree) => {
     const result = spawnSync(socketEnvHook, [], {
       encoding: "utf8",
-      env: hookEnvironment(tree),
+      env: {
+        ...hookEnvironment(tree),
+        CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL: "1",
+      },
     });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "");
+    assert.equal(result.stdout, "env CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL=0\n");
     assert.equal(result.stderr, "");
   });
 });
@@ -743,14 +810,15 @@ test("socket hook emits exactly the attachment routing records for a valid descr
     assert.equal(result.status, 0, result.stderr);
     assert.equal(
       result.stdout,
-      "env CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY=1\n" +
+      "env CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL=0\n" +
+        "env CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY=1\n" +
         `env CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET=${socketPath}\n`,
     );
     assert.equal(result.stderr, "");
   });
 });
 
-test("socket hook rejects invalid descriptors with one redaction-safe diagnostic and no routing", () => {
+test("socket hook marks invalid present descriptors fatal with one redaction-safe diagnostic", () => {
   withDescriptorTree((tree) => {
     const unsafeSocketPath = "relative\nsecret";
     writeDescriptor(tree.descriptorPath, descriptorSource(unsafeSocketPath));
@@ -758,16 +826,46 @@ test("socket hook rejects invalid descriptors with one redaction-safe diagnostic
       encoding: "utf8",
       env: hookEnvironment(tree),
     });
-    assert.notEqual(result.status, 0);
-    assert.equal(result.stdout, "");
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "env CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL=1\n");
     assert.match(result.stderr, /attachment descriptor/i);
     assert.equal(result.stderr.trim().split("\n").length, 1);
-    assert.equal(result.stderr.includes(tree.root), false);
-    assert.equal(result.stderr.includes(unsafeSocketPath), false);
+    for (const forbidden of [tree.descriptorPath, tree.root, "relative", "secret"]) {
+      assert.equal(result.stderr.includes(forbidden), false, `diagnostic leaked ${forbidden}`);
+    }
   });
 });
 
-test("socket hook preserves explicitly configured development routing without reading a descriptor", () => {
+test("socket hook discards reader routing output after a reader failure", () => {
+  withDescriptorTree((tree) => {
+    const stubFeatureRoot = path.join(tree.root, "stub-features");
+    const stubReader = path.join(
+      stubFeatureRoot,
+      "external-app-server-attachment",
+      "descriptor-reader.js",
+    );
+    fs.mkdirSync(path.dirname(stubReader), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(
+      stubReader,
+      [
+        "process.stdout.write('env CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY=1\\n');",
+        "process.stdout.write('env CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET=/tmp/leaked.sock\\n');",
+        "process.stderr.write('ERROR: controlled reader failure\\n');",
+        "process.exitCode=1;",
+      ].join(""),
+      { mode: 0o600 },
+    );
+    const result = spawnSync(socketEnvHook, [], {
+      encoding: "utf8",
+      env: { ...hookEnvironment(tree), CODEX_LINUX_FEATURES_DIR: stubFeatureRoot },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "env CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL=1\n");
+    assert.equal(result.stderr, "ERROR: controlled reader failure\n");
+  });
+});
+
+test("socket hook clears stale fatal state for explicitly configured development routing", () => {
   for (const explicitEnv of [
     { CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY: "1" },
     { CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET: "/tmp/explicit-development.sock" },
@@ -776,10 +874,14 @@ test("socket hook preserves explicitly configured development routing without re
       writeDescriptor(tree.descriptorPath, "not valid JSON");
       const result = spawnSync(socketEnvHook, [], {
         encoding: "utf8",
-        env: { ...hookEnvironment(tree), ...explicitEnv },
+        env: {
+          ...hookEnvironment(tree),
+          ...explicitEnv,
+          CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL: "1",
+        },
       });
       assert.equal(result.status, 0, result.stderr);
-      assert.equal(result.stdout, "");
+      assert.equal(result.stdout, "env CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL=0\n");
       assert.equal(result.stderr, "");
     });
   }
@@ -832,25 +934,74 @@ test("patch selects the bridge only for the local host and is idempotent", () =>
   assert.match(patched, /supportsReconnect\(\)\{return!0\}/);
 });
 
-test("patch selects attachment-only transport only for explicit local mode and fails closed", () => {
+test("patch makes the fatal marker win before every transport branch", async (t) => {
   const patched = applyExternalAppServerAttachmentPatch(syntheticBundle());
+  assert.match(patched, /CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL===`1`/);
   assert.match(patched, /CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY===`1`/);
   assert.match(patched, /new CodexLinuxExternalAppServerSocketTransport/);
 
-  const select = (env, hostKind = "local") => {
+  const makeSelector = ({ sshEndpoint = null, transportKind, wsl = false, remoteWebSocket = null } = {}) => {
+    const calls = {
+      local: 0,
+      remoteControl: 0,
+      remoteWebSocket: 0,
+      remoteWebSocketLookup: 0,
+      sshLookup: 0,
+      sshTransport: 0,
+      wsl: 0,
+      wslLookup: 0,
+    };
+    class LocalAppServerTransport {
+      constructor() {
+        calls.local += 1;
+      }
+    }
+    class RemoteControlTransport {
+      constructor() {
+        calls.remoteControl += 1;
+      }
+    }
+    class RemoteWebSocketTransport {
+      constructor() {
+        calls.remoteWebSocket += 1;
+      }
+    }
+    class WslTransport {
+      constructor() {
+        calls.wsl += 1;
+      }
+    }
     const context = {
-      process: { env },
+      process: { env: {} },
       require,
       console,
       setTimeout,
       clearTimeout,
-      r: { i: () => null },
-      r6: () => null,
+      r: {
+        i: () => {
+          calls.sshTransport += 1;
+          return null;
+        },
+      },
+      r6: () => {
+        calls.remoteWebSocketLookup += 1;
+        return remoteWebSocket;
+      },
+      p8: () => null,
       Z: { info() {} },
-      Jy: () => null,
+      Jy: () => {
+        calls.sshLookup += 1;
+        return sshEndpoint;
+      },
+      Remote: RemoteControlTransport,
+      Wsl: WslTransport,
       n: {
-        io: () => false,
-        Nn: class LocalAppServerTransport {},
+        io: () => {
+          calls.wslLookup += 1;
+          return wsl;
+        },
+        Fn: RemoteWebSocketTransport,
+        Nn: LocalAppServerTransport,
         WS: class {},
         keepAlive() {},
         Adapter: class {},
@@ -858,29 +1009,86 @@ test("patch selects attachment-only transport only for explicit local mode and f
       Fy: "ws://localhost/rpc",
     };
     vm.runInNewContext(`${patched};globalThis.selectTransport=n6`, context);
-    return context.selectTransport({ hostConfig: { kind: hostKind } });
+    return {
+      calls,
+      select(env, hostKind = "local") {
+        context.process.env = env;
+        return context.selectTransport({
+          hostConfig: { kind: hostKind },
+          transportKind,
+          repoRoot: "/repo",
+          resourcesPath: "/resources",
+          defaultOriginator: "test",
+        });
+      },
+    };
   };
 
   const socketPath = "/tmp/gate4-attachment-only.sock";
-  const attachment = select({
+  const attachmentSelector = makeSelector();
+  const attachment = attachmentSelector.select({
     CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY: "1",
     CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET: socketPath,
   });
   assert.equal(attachment.constructor.name, "CodexLinuxExternalAppServerSocketTransport");
   assert.equal(attachment.socketPath, socketPath);
 
-  const ordinary = select({
-    CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET: socketPath,
-  });
-  assert.equal(ordinary.constructor.name, "LocalAppServerTransport");
+  for (const [name, env] of [
+    ["FATAL=0", { CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL: "0" }],
+    ["non-exact fatal marker", { CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL: "true" }],
+    ["socket-only configuration", { CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET: socketPath }],
+    [
+      "non-exact attach-only marker",
+      {
+        CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY: "true",
+        CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET: socketPath,
+      },
+    ],
+  ]) {
+    const selector = makeSelector();
+    assert.equal(selector.select(env).constructor.name, "LocalAppServerTransport", name);
+  }
+
+  for (const branch of [
+    ["SSH", { sshEndpoint: "ssh://example.test" }, "Ky"],
+    ["remote control", { transportKind: "remote-control" }, "RemoteControlTransport"],
+    ["WSL", { wsl: true }, "WslTransport"],
+    ["remote WebSocket", { remoteWebSocket: "ws://remote.test/rpc" }, "RemoteWebSocketTransport"],
+    ["ordinary local", {}, "LocalAppServerTransport"],
+  ]) {
+    const [name, options, constructorName] = branch;
+    await t.test(name, () => {
+      const selector = makeSelector(options);
+      assert.equal(selector.select({}).constructor.name, constructorName);
+      const beforeFatal = { ...selector.calls };
+      assert.throws(
+        () => selector.select({ CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL: "1" }),
+        /attachment descriptor selection failed/,
+      );
+      assert.deepEqual(
+        selector.calls,
+        beforeFatal,
+        "fatal selection must throw before the eligible transport branch is examined or constructed",
+      );
+    });
+  }
 
   assert.throws(
-    () => select({ CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY: "1" }),
+    () =>
+      makeSelector().select({
+        CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL: "1",
+        CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY: "1",
+        CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET: socketPath,
+      }),
+    /attachment descriptor selection failed/,
+  );
+  assert.throws(
+    () => makeSelector().select({ CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY: "1" }),
     /requires CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET/,
   );
   assert.throws(
     () =>
-      select(
+      makeSelector().select(
         {
           CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY: "1",
           CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET: socketPath,

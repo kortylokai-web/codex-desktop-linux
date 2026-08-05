@@ -5905,7 +5905,7 @@ source = open(source_path, encoding="utf-8").read()
 host_command_helpers = source[
     source.index("codex_restore_original_ld_library_path() {"):
     source.index("# Capture before package-specific launcher patches")
-]
+].replace('SCRIPT_DIR="$(resolve_script_dir)"', "", 1)
 start = source.index("is_wsl_environment() {")
 end = source.index("configure_side_by_side_app_env() {")
 helpers = source[start:end].replace(
@@ -5955,6 +5955,10 @@ print_state() {
     printf '\n'
 }
 
+print_feature_hook_child_env() {
+    bash -c 'printf "hook_child_fatal=%s hook_child_attach_only=%s hook_child_socket=%s\\n" "${CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL:-}" "${CODEX_LINUX_APP_SERVER_BRIDGE_ATTACH_ONLY:-}" "${CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET:-}"'
+}
+
 case "${1:-}" in
     probe)
         shift
@@ -5962,6 +5966,7 @@ case "${1:-}" in
         load_user_electron_flags
         set_electron_defaults "${FEATURE_ELECTRON_ARGS[@]}" "${USER_ELECTRON_FLAGS[@]}" "$@"
         run_feature_launcher_hooks
+        print_feature_hook_child_env
         build_electron_launch_args
         print_state
         ;;
@@ -6060,6 +6065,33 @@ EOF
     [[ "$output" == *"hook_value=from-hook hook_saw_arg=1"* ]] || fail "launcher hook must contribute environment variables and receive current Electron args: $output"
     [[ "$output" == *"electron=<--existing-electron-arg><--test-feature-launcher-hook=1>"* ]] || fail "launcher hook must append Electron args after existing args: $output"
     [[ "$output" == *"<--enable-features=TestHookFeature>"* ]] || fail "launcher hook enable-features output must merge into launch args: $output"
+
+    local attachment_probe_root="$TMP_DIR/external-app-server-attachment-hook"
+    local attachment_app_dir="$attachment_probe_root/app"
+    local attachment_features_dir="$attachment_probe_root/features"
+    local attachment_hook_dir="$attachment_probe_root/launcher.d"
+    local attachment_config_dir="$attachment_probe_root/config"
+    mkdir -p \
+        "$attachment_app_dir/resources/node-runtime/bin" \
+        "$attachment_features_dir/external-app-server-attachment" \
+        "$attachment_hook_dir" \
+        "$attachment_config_dir/codex-desktop"
+    ln -s "$(command -v node)" "$attachment_app_dir/resources/node-runtime/bin/node"
+    ln -s "$REPO_DIR/linux-features/external-app-server-attachment/descriptor-reader.js" \
+        "$attachment_features_dir/external-app-server-attachment/descriptor-reader.js"
+    ln -s "$REPO_DIR/linux-features/external-app-server-attachment/socket-env.sh" \
+        "$attachment_hook_dir/external-app-server-attachment"
+    printf '%s\n' 'not valid JSON' > "$attachment_config_dir/codex-desktop/app-server-attachment.json"
+    chmod 600 "$attachment_config_dir/codex-desktop/app-server-attachment.json"
+
+    output="$(env -i PATH="$PATH" HOME="$attachment_probe_root/home" XDG_CONFIG_HOME="$attachment_config_dir" SCRIPT_DIR="$attachment_app_dir" CODEX_LINUX_FEATURES_DIR="$attachment_features_dir" FEATURE_LAUNCHER_HOOK_DIR="$attachment_hook_dir" CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe)"
+    grep -Fxq 'hook_child_fatal=1 hook_child_attach_only= hook_child_socket=' <<<"$output" \
+        || fail "malformed attachment descriptor must propagate a fatal marker through the generic launcher runner: $output"
+
+    rm -f "$attachment_config_dir/codex-desktop/app-server-attachment.json"
+    output="$(env -i PATH="$PATH" HOME="$attachment_probe_root/home" XDG_CONFIG_HOME="$attachment_config_dir" SCRIPT_DIR="$attachment_app_dir" CODEX_LINUX_FEATURES_DIR="$attachment_features_dir" FEATURE_LAUNCHER_HOOK_DIR="$attachment_hook_dir" CODEX_LINUX_EXTERNAL_APP_SERVER_ATTACHMENT_FATAL=1 CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe)"
+    grep -Fxq 'hook_child_fatal=0 hook_child_attach_only= hook_child_socket=' <<<"$output" \
+        || fail "absent attachment descriptor must clear inherited fatal state through the generic launcher runner: $output"
 
     local user_flags_dir="$TMP_DIR/user-electron-flags"
     local user_flags_file="$user_flags_dir/electron-flags.conf"
