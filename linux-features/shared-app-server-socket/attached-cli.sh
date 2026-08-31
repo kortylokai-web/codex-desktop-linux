@@ -11,7 +11,8 @@ attached_cli_effective_uid() {
 attached_cli_filesystem_metadata() {
     local target=$1 metadata kind link=
 
-    metadata=$(command stat -c $'%F\t%a\t%u\t%d\t%i' -- "$target" 2>/dev/null) || return 1
+    metadata=$(LC_ALL=C command stat -c $'%F\t%a\t%u\t%d\t%i' -- "$target" 2>/dev/null) ||
+        return 1
     kind=${metadata%%$'\t'*}
     if [[ $kind == "symbolic link" ]]; then
         link=$(command readlink -- "$target" 2>/dev/null) || return 1
@@ -113,7 +114,8 @@ attached_cli_read_process() {
     start=${fields[19]}
     [[ $state =~ ^[^[:space:]]$ && $parent =~ ^[0-9]+$ && $start =~ ^[0-9]+$ ]] ||
         return "$ATTACHED_CLI_UNSAFE"
-    [[ $state != Z && $start == "$expected_start" ]] || return "$ATTACHED_CLI_MISMATCH"
+    [[ $state != Z ]] || return "$ATTACHED_CLI_UNAVAILABLE"
+    [[ $start == "$expected_start" ]] || return "$ATTACHED_CLI_MISMATCH"
     if [[ -n $expected_parent && $parent != "$expected_parent" ]]; then
         return "$ATTACHED_CLI_MISMATCH"
     fi
@@ -178,8 +180,11 @@ attached_cli_read_listener() {
         if [[ $unix_path == "$socket" ]]; then
             [[ $number == *: && $ref_count =~ ^[0-9A-Fa-f]+$ &&
                 $protocol =~ ^[0-9A-Fa-f]+$ && $flags =~ ^[0-9A-Fa-f]+$ &&
-                $type == 0001 && $state == 01 && $inode =~ ^[1-9][0-9]*$ ]] ||
+                $type =~ ^[0-9A-Fa-f]+$ && $state =~ ^[0-9A-Fa-f]+$ &&
+                $inode =~ ^[1-9][0-9]*$ ]] ||
                 return "$ATTACHED_CLI_UNSAFE"
+            [[ $flags == 00010000 && $type == 0001 && $state == 01 ]] ||
+                return "$ATTACHED_CLI_MISMATCH"
             ((listener_count += 1))
             listener_inode=$inode
         fi
@@ -364,8 +369,8 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     attached_cli_filesystem_metadata() {
         local target=$1 metadata kind link=
 
-        metadata=$("$ATTACHED_CLI_STAT_BIN" -c $'%F\t%a\t%u\t%d\t%i' -- "$target" 2>/dev/null) ||
-            return 1
+        metadata=$(LC_ALL=C "$ATTACHED_CLI_STAT_BIN" -c $'%F\t%a\t%u\t%d\t%i' -- "$target" \
+            2>/dev/null) || return 1
         kind=${metadata%%$'\t'*}
         if [[ $kind == "symbolic link" ]]; then
             link=$("$ATTACHED_CLI_READLINK_BIN" -- "$target" 2>/dev/null) || return 1

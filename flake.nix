@@ -881,7 +881,9 @@
             'path=${lib.optionalString expectNixBwrap "${nixosBwrap}/bin:"}${runtimePathFor package.passthru.effectiveLinuxFeatureIds}:/caller/bin' \
             "$capture"
           ${pkgs.gnugrep}/bin/grep -Fx 'ld=x:/caller/lib' "$capture"
-          ${pkgs.gnugrep}/bin/grep -Fx 'args=<--diagnose>' "$capture"
+          ${pkgs.gnugrep}/bin/grep -Fx \
+            'args=<--ozone-platform=wayland><--enable-wayland-ime=true><--wayland-text-input-version=3><--diagnose>' \
+            "$capture"
           ${pkgs.coreutils}/bin/env ALSA_PLUGIN_DIR=/caller/alsa XDG_DATA_DIRS=/caller/share \
             BAMF_DESKTOP_FILE_HINT=/caller/desktop LD_LIBRARY_PATH= \
             BASH_ENV=${wrapperEnvironmentProbe} CODEX_NIX_ENV_CAPTURE="$capture" \

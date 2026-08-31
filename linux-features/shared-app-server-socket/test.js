@@ -861,7 +861,7 @@ test("shared-app-server-socket stays disabled until explicitly enabled", () => {
   });
 });
 
-test("feature stages its socket hooks and orphan reaper", () => {
+test("feature stages its socket hooks, orphan reaper, and attached CLI", () => {
   withFeatureConfig(["shared-app-server-socket"], (featuresRoot) => {
     const appDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-socket-app-"));
     try {
@@ -889,21 +889,7 @@ test("feature stages its socket hooks and orphan reaper", () => {
           ],
         ],
       );
-    } finally {
-      fs.rmSync(appDir, { recursive: true, force: true });
-    }
-  });
-});
-
-test("attached CLI resource is staged executable", () => {
-  withFeatureConfig(["shared-app-server-socket"], (featuresRoot) => {
-    const appDir = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-attached-cli-app-"));
-    try {
-      const plan = stageEnabledLinuxFeatureInstall(appDir, { featuresRoot });
       const target = ".codex-linux/features/shared-app-server-socket/attached-cli.sh";
-      const resource = plan.resources.find((entry) => entry.target === target);
-      assert.ok(resource, "attached CLI resource descriptor is required");
-      assert.equal(resource.mode, 0o755);
       const staged = path.join(appDir, target);
       assert.equal(fs.lstatSync(staged).isFile(), true);
       assert.equal(fs.lstatSync(staged).isSymbolicLink(), false);
@@ -912,6 +898,69 @@ test("attached CLI resource is staged executable", () => {
       fs.rmSync(appDir, { recursive: true, force: true });
     }
   });
+});
+
+test("attached CLI metadata is locale stable in sourced and direct modes", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shared-app-server-attached-cli-locale-"));
+  try {
+    const runtimeRoot = path.join(root, "runtime");
+    const recordDir = path.join(runtimeRoot, "codex-desktop", "app-server-bridge");
+    const binDir = path.join(root, "bin");
+    const statWrapper = path.join(binDir, "stat");
+    const realStat = spawnSync("bash", ["-c", "command -v stat"], { encoding: "utf8" });
+    assert.equal(realStat.status, 0, realStat.stderr);
+    fs.mkdirSync(recordDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(recordDir, 0o700);
+    writeAttachedCliFixtureFile(
+      statWrapper,
+      [
+        "#!/usr/bin/env bash",
+        'metadata=$("$ATTACHED_TEST_REAL_STAT" "$@") || exit $?',
+        "if [[ ${LANGUAGE-} == de && ${LC_ALL-} != C ]]; then",
+        "  metadata=${metadata/#directory/Verzeichnis}",
+        "fi",
+        "printf '%s\\n' \"$metadata\"",
+        "",
+      ].join("\n"),
+      0o755,
+    );
+    const environment = {
+      ...process.env,
+      ATTACHED_TEST_REAL_STAT: realStat.stdout.trim(),
+      CODEX_LINUX_APP_ID: "codex-desktop",
+      LANG: "C",
+      LANGUAGE: "de",
+      PATH: `${binDir}:${process.env.PATH}`,
+      XDG_RUNTIME_DIR: runtimeRoot,
+    };
+    delete environment.LC_ALL;
+    const sourced = spawnSync(
+      "bash",
+      [
+        "-c",
+        'source "$1"; attached_cli_filesystem_metadata "$2"',
+        "attached-cli-locale-test",
+        attachedCli,
+        recordDir,
+      ],
+      { encoding: "utf8", env: environment },
+    );
+    assert.equal(sourced.status, 0, sourced.stderr);
+    assert.match(sourced.stdout, /^directory\t700\t/);
+
+    const direct = spawnSync("bash", [attachedCli, "exec"], {
+      encoding: "utf8",
+      env: environment,
+    });
+    assert.equal(direct.status, 1, direct.stderr);
+    assert.equal(direct.stdout, "");
+    assert.equal(
+      direct.stderr,
+      "codex-desktop: Desktop shared app server is not available\n",
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("attached CLI verifier rejects record metadata", () => {
@@ -1127,6 +1176,11 @@ test("attached CLI verifier rejects stale authority identity", () => {
           startTime: fixture.authorityStartTime,
         }),
       ),
+  ]) {
+    runCase({ expected: 10, mutate });
+  }
+
+  for (const mutate of [
     (fixture) =>
       writeAttachedCliProcessFile(
         fixture,
@@ -1180,6 +1234,15 @@ test("attached CLI verifier rejects stale authority identity", () => {
   runCase({
     expected: 12,
     mutate(fixture) {
+      writeListenerTable(
+        fixture,
+        `0000000000000000: 00000002 00000000 00000000 0001 01 ${fixture.listenerInode} ${fixture.socketPath}\n`,
+      );
+    },
+  });
+  runCase({
+    expected: 12,
+    mutate(fixture) {
       const line = `0000000000000000: 00000002 00000000 00010000 0001 01 ${fixture.listenerInode} ${fixture.socketPath}\n`;
       writeListenerTable(
         fixture,
@@ -1203,8 +1266,17 @@ test("attached CLI verifier reports redacted failure categories", () => {
   const cases = [
     {
       expected: "codex-desktop: Desktop shared app server is not available\n",
-      options(fixture) {
-        return { missingPath: fixture.recordPath };
+      mutate(fixture) {
+        writeAttachedCliProcessFile(
+          fixture,
+          fixture.ownerPid,
+          "stat",
+          procStat(fixture.ownerPid, {
+            state: "Z",
+            ppid: 1,
+            startTime: fixture.ownerStartTime,
+          }),
+        );
       },
     },
     {
@@ -1691,6 +1763,23 @@ test("attached CLI publication failure is nonfatal", async () => {
   fs.writeFileSync(recordPath, priorRecord, { mode: 0o600 });
   const removed = [];
   const fsImpl = Object.create(fs);
+  let failTemporaryFstat = false;
+  let failedTemporaryDescriptor = null;
+  let openedTemporaryPath = null;
+  fsImpl.openSync = (target, ...args) => {
+    const descriptor = fs.openSync(target, ...args);
+    if (failTemporaryFstat && path.basename(target).startsWith(".attached-cli-v1.")) {
+      failedTemporaryDescriptor = descriptor;
+      openedTemporaryPath = target;
+    }
+    return descriptor;
+  };
+  fsImpl.fstatSync = (descriptor, ...args) => {
+    if (failTemporaryFstat && descriptor === failedTemporaryDescriptor) {
+      throw new Error("fstat failed");
+    }
+    return fs.fstatSync(descriptor, ...args);
+  };
   fsImpl.renameSync = () => {
     throw new Error("rename failed");
   };
@@ -1727,7 +1816,10 @@ test("attached CLI publication failure is nonfatal", async () => {
         await transport.ensureAuthority();
         assert.equal(transport.authority, child);
         assert.equal(fs.lstatSync(socketPath).isSocket(), true);
-        assert.match(fs.readFileSync(`${socketPath}.lock`, "utf8"), new RegExp(`^${process.pid} \\d+ ${process.pid} \\d+\\n$`));
+        assert.match(
+          fs.readFileSync(`${socketPath}.lock`, "utf8"),
+          new RegExp(`^${process.pid} \\d+ ${process.pid} \\d+\\n$`),
+        );
         assert.equal(fs.readFileSync(recordPath, "utf8"), priorRecord);
         assert.equal(removed.length, 1);
         assert.equal(path.dirname(removed[0]), bridgeDir);
@@ -1744,6 +1836,37 @@ test("attached CLI publication failure is nonfatal", async () => {
     });
 
     warnings.length = 0;
+    removed.length = 0;
+    failTemporaryFstat = true;
+    await withAttachedCliEnvironment({
+      CODEX_CLI_PATH: "/fake/codex",
+      CODEX_LINUX_APP_ID: appId,
+      CODEX_LINUX_APP_STATE_DIR: runtimeRoot,
+      XDG_RUNTIME_DIR: runtimeRoot,
+    }, async () => {
+      const transport = new Transport(socketPath);
+      try {
+        await transport.ensureAuthority();
+        assert.equal(transport.authority, child);
+        assert.equal(fs.lstatSync(socketPath).isSocket(), true);
+        assert.match(fs.readFileSync(`${socketPath}.lock`, "utf8"), new RegExp(`^${process.pid} \\d+ ${process.pid} \\d+\\n$`));
+        assert.equal(fs.readFileSync(recordPath, "utf8"), priorRecord);
+        assert.deepEqual(removed, [openedTemporaryPath]);
+        assert.notEqual(openedTemporaryPath, recordPath);
+        assert.throws(() => fs.fstatSync(failedTemporaryDescriptor), { code: "EBADF" });
+        assert.deepEqual(warnings, ["WARN: attached CLI discovery record was not published"]);
+      } finally {
+        await closeServer(server);
+        server = null;
+        if (child != null) {
+          child.exitCode = 0;
+          child.emit("exit", 0, null);
+        }
+      }
+    });
+
+    warnings.length = 0;
+    failTemporaryFstat = false;
     await withAttachedCliEnvironment({
       CODEX_CLI_PATH: "/fake/codex",
       CODEX_LINUX_APP_ID: "unsafe\nid",
@@ -2774,7 +2897,7 @@ test("orphan reaper JavaScript syntax is valid", () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("documented wrapper attaches to a real Codex authority through the stock proxy", { timeout: 15000 }, async (t) => {
+test("stock Codex proxy connects to a real authority", { timeout: 15000 }, async (t) => {
   const codexCli = process.env.CODEX_CLI_PATH;
   if (codexCli == null) {
     t.skip("set CODEX_CLI_PATH to run the real Codex app-server integration test");
@@ -2787,30 +2910,11 @@ test("documented wrapper attaches to a real Codex authority through the stock pr
   );
   const codexHome = path.join(tempDir, "codex-home");
   const socketPath = path.join(tempDir, "authority", "app-server.sock");
-  const binDir = path.join(tempDir, "bin");
-  const wrapperPath = path.join(binDir, "codex");
   fs.mkdirSync(codexHome, { mode: 0o700 });
   fs.mkdirSync(path.dirname(socketPath), { mode: 0o700 });
-  fs.mkdirSync(binDir, { mode: 0o700 });
-  fs.writeFileSync(
-    wrapperPath,
-    [
-      "#!/usr/bin/env bash",
-      "set -eu",
-      'if [ "$#" -eq 2 ] && [ "$1" = "app-server" ] && [ "$2" = "proxy" ]; then',
-      '  exec "$REAL_CODEX" app-server proxy --sock "$DESKTOP_SOCKET"',
-      "fi",
-      'exec "$REAL_CODEX" "$@"',
-      "",
-    ].join("\n"),
-    { mode: 0o700 },
-  );
   const env = {
     ...process.env,
     CODEX_HOME: codexHome,
-    DESKTOP_SOCKET: socketPath,
-    PATH: `${binDir}:${process.env.PATH}`,
-    REAL_CODEX: codexCli,
   };
   const authority = spawn(codexCli, ["app-server", "--listen", `unix://${socketPath}`], {
     env,
@@ -2826,7 +2930,7 @@ test("documented wrapper attaches to a real Codex authority through the stock pr
       "app-server socket must not grant group/other access",
     );
 
-    proxy = spawn("bash", ["-c", "codex app-server proxy"], {
+    proxy = spawn(codexCli, ["app-server", "proxy", "--sock", socketPath], {
       env,
       stdio: ["pipe", "pipe", "ignore"],
     });
