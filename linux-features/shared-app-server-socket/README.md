@@ -7,9 +7,10 @@ app-server:
 codex-desktop --cli [Codex CLI arguments]
 ```
 
-Desktop is the only authority owner. The attached command uses the stock bundled
-Codex CLI and Desktop's verified local connection; it never starts, selects, or
-replaces an app server.
+Desktop is the only authority owner. Commands that attach use the CLI executable
+selected by Desktop: packaged `resources/codex` by default, or `CODEX_CLI_PATH`
+for compatibility. They use Desktop's verified local connection and never start,
+select, or replace an app server.
 
 ## Enable and update
 
@@ -31,7 +32,7 @@ selection, so keep the ID enabled when updating.
 
 Start and keep Desktop running, then invoke the attached CLI with
 `codex-desktop --cli [Codex CLI arguments]`. The wrapper removes only the
-leading `--cli`; all later arguments are for the stock Codex CLI.
+leading `--cli`; all later arguments remain Codex CLI arguments.
 
 `--` is a literal boundary: every argument after it is passed unchanged. Before
 that boundary, callers cannot provide an endpoint, socket, authentication,

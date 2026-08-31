@@ -1029,6 +1029,10 @@ test("attached CLI verifier rejects record metadata", () => {
       const contents = fs.readFileSync(fixture.recordPath);
       fs.writeFileSync(fixture.recordPath, Buffer.concat([contents, Buffer.from([0])]));
     },
+    (fixture) => {
+      const contents = fs.readFileSync(fixture.recordPath);
+      fs.writeFileSync(fixture.recordPath, Buffer.concat([contents, Buffer.from("trailing")]));
+    },
   ]) {
     runCase({ expected: 11, mutate });
   }
@@ -1077,6 +1081,7 @@ test("attached CLI verifier rejects record metadata", () => {
     "41001 7001 41002 7002 trailing\n",
     "41001 07001 41002 7002\n",
     "41001 7001 41002 7002\n41003 7003 41004 7004\n",
+    "41001 7001 41002 7002\ntrailing",
   ]) {
     runCase({
       expected: 11,

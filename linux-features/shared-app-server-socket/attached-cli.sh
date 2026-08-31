@@ -62,6 +62,7 @@ attached_cli_read_lines() {
     while IFS= read -r line; do
         ATTACHED_CLI_LINES+=("$line")
     done 2>/dev/null <"$target" || return "$ATTACHED_CLI_UNAVAILABLE"
+    [[ -z $line ]] || return "$ATTACHED_CLI_UNSAFE"
 }
 
 attached_cli_snapshot_append() {
