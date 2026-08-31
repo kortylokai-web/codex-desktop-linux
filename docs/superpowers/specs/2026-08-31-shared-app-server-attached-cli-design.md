@@ -151,8 +151,13 @@ AppImage, Nix, amd64, and arm64 one dispatch implementation.
 
 `attached-cli.sh` is a feature resource, uses Bash plus Linux `/proc` and the
 baseline launcher utilities only, and reads no caller endpoint or executable
-override. It derives the one fixed record location, reads the record, and
-builds an initial snapshot. It fails closed unless all conditions hold:
+override. In direct execution, it resolves `id`, `stat`, and `readlink` through
+`command -v` on the launcher's runtime-compatible command path and invokes only
+those resolved executables; it must not hardcode `/usr/bin`. Direct execution
+hard-binds those resolved executables, the one fixed app-scoped record root,
+and the real `/proc` root, with no caller environment or argument override. It
+then reads the record and builds an initial snapshot. It fails closed unless all
+conditions hold:
 
 1. The app-scoped directory is a same-user, non-symlink directory at mode
    `0700`; the record is a same-user, non-symlink regular file at mode `0600`.
@@ -252,35 +257,45 @@ distinct public or security failure mode; do not assert helper internals.
 2. In the launcher test, cover exact leading dispatch, disabled error, help
    visibility, and unchanged ordinary invocation. Do not test the private
    verifier implementation through launcher call counts.
-3. In the Nix contract, add one Wayland-enabled CLI case proving that the
-   common launcher receives only caller `--cli` arguments. Retain an ordinary
-   Desktop case proving it receives all three derived Electron flags.
-4. Extend the existing update-builder test to assert the enabled feature tree
+3. Extend the existing update-builder test to assert the enabled feature tree
    contains the executable resource and enabled configuration; use existing
-   package/final-tree checks for every output format and architecture.
+   non-Nix package/final-tree checks for the exercised output formats and
+   architectures. Do not add Nix-specific test coverage.
 
 Tests may source the verifier and invoke its public verification entry with an
-explicit fixture record root and fixture `/proc` root. The installed script
-always passes its fixed app-scoped discovery root and literal `/proc`, and
-ignores caller environment or argument overrides for either path. Assert public
+explicit fixture record root and fixture `/proc` root. The installed direct mode
+resolves `id`, `stat`, and `readlink` through `command -v`, then always passes
+its fixed app-scoped discovery root, literal `/proc`, and resolved executables;
+caller environment or arguments cannot override any of them. Assert public
 status, stderr/stdout, `exec` result, and fixture state rather than private
 helper call counts. Include a disposable fake-Codex signal-propagation case and
 require every failing fixture to remain byte-for-byte unchanged. These are test
 inputs only; no production validation bypass exists.
 
-Run the focused Node tests, shell syntax checks, and `nix flake check`, then
-the applicable `./scripts/ci-local.sh all` gate. For a feature-enabled official
-bundle check, use the existing build path only; add no attached-CLI matrix,
-framework, parser, or dependency.
+Run the focused Node tests and shell syntax checks, then
+`./scripts/ci-local.sh pr upstream`. Do not run `./scripts/ci-local.sh all`,
+any Nix command, or use a hosted Nix result as acceptance evidence. For a
+feature-enabled official bundle check, use the existing non-Nix build path only;
+add no attached-CLI matrix, framework, parser, or dependency.
 
 ## Manual Gate
 
-After all automated gates pass and before delivery, an operator must enable the
-existing feature in a disposable build, start Desktop, run a normal command via
-`codex-desktop --cli`, run CSC's existing thirteen-tool suite, and confirm one
-listener/authority. Close Desktop and confirm a subsequent attached invocation
-fails closed. Hosted package evidence remains authoritative for formats and
-architectures unavailable on the local host.
+After all automated gates pass and before delivery, make the desired permanent
+installation. Preserve every currently enabled Desktop feature; add
+`shared-app-server-socket` only if it is missing, without replacing the existing
+feature selection. Install or refresh the exact checkout-local CSC candidate
+`codex-session-control@codex-session-control-local` from the prerequisite
+candidate at `3a8df2a1b0bb79db22a323b228562040787e40af` idempotently, and leave
+both the plugin and its marketplace installed. Do not remove either one.
+
+Install or refresh the Desktop package through its normal feature/package flow,
+restart Desktop, run a normal command via `codex-desktop --cli`, run CSC's
+existing thirteen-tool suite, and confirm one listener/authority. Close Desktop
+only to confirm that a subsequent attached invocation fails closed, then restart
+it. Clean only disposable test tasks and workdirs; retain the permanent feature
+selection, Desktop installation, and CSC plugin/marketplace. Hosted non-Nix
+package evidence remains authoritative for non-Nix formats and architectures
+unavailable on the local host; hosted Nix results are not acceptance evidence.
 
 ## KISS, DRY, and YAGNI Checks
 
@@ -310,24 +325,25 @@ architectures unavailable on the local host.
    including final disappearance, returns `state is unsafe`; every live
    identity/parent/executable/command/listener disagreement returns `authority
    does not match Desktop`. All remain redacted and nonmutating.
-5. The verifier proves same-user private metadata, lock/process identities,
-   Desktop-parented authority, expected command, and one listener both before
-   and immediately before `exec`.
+5. In direct execution, the verifier resolves `id`, `stat`, and `readlink`
+   through `command -v` rather than hardcoding `/usr/bin`, accepts no caller
+   override of its resolved executables or real record/process roots, and proves
+   same-user private metadata, lock/process identities, Desktop-parented
+   authority, expected command, and one listener both before and immediately
+   before `exec`.
 6. Pre-delimiter endpoint and authority inputs fail with the exact status-`2`
    grammar error; all arguments after `--` remain literal.
 7. Enabled `--cli` help/version forms work without Desktop and do not inject a
    remote endpoint; all other accepted forms require live verification.
 8. Normal Desktop invocation, feature-disabled output, and existing feature
    orphan handling remain unchanged.
-9. Nix preserves ordinary Wayland Electron flags while passing none into CLI
-   mode, and source/native/AppImage/Nix outputs stage the same feature resource
-   on amd64 and arm64.
-10. The three reader surfaces accurately document enablement, Desktop-open
-    dependence, invocation, removal, and the absence of a second authority.
-11. Focused RED→GREEN tests, relevant repository gates, and the explicit
-    manual gate provide the required evidence without new dependencies or test
-    infrastructure.
-12. Publication failure is nonfatal to the existing Desktop authority and
+9. The three reader surfaces accurately document enablement, Desktop-open
+   dependence, invocation, removal, and the absence of a second authority.
+10. Focused RED→GREEN tests, `./scripts/ci-local.sh pr upstream`, and the
+    explicit manual gate provide the required evidence without new dependencies
+    or test infrastructure. `./scripts/ci-local.sh all`, Nix commands, and
+    hosted Nix results are excluded from acceptance evidence.
+11. Publication failure is nonfatal to the existing Desktop authority and
     removes only a publisher-owned temporary record before rename; fixture-root
     injection is available only to sourced tests, while installed behavior uses
     fixed real roots.

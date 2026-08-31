@@ -265,22 +265,17 @@ Protect the contract with narrow tests:
 2. Extend the launcher test for exact leading `--cli` dispatch, the disabled
    error, and unchanged normal Desktop launch. Do not assert private helper call
    structure.
-3. Extend the existing Nix wrapper contract with one Wayland-enabled case that
-   proves CLI mode passes only the caller's `--cli` argument vector to the
-   common launcher. Extend the launcher contract to prove ordinary Desktop mode
-   still receives all three derived Wayland flags and CLI mode receives none.
-   Keep the existing normal invocation assertions.
-4. Reuse existing package-common and final-tree tests to prove that enabled
+3. Reuse existing package-common and final-tree tests to prove that enabled
    feature resources and launcher changes reach update-builder output and each
-   package family. Reuse existing format/architecture gates rather than creating
-   an attached-CLI matrix.
-5. Run the repository's existing shell, Bash, Nix, smoke, and CI-local gates
+   exercised non-Nix package family. Reuse existing non-Nix format/architecture
+   gates rather than creating an attached-CLI matrix.
+4. Run the repository's existing shell, Bash, smoke, and CI-local gates
    that cover touched files. Add no testing framework or package dependency.
-6. At the final authorized manual gate, enable the feature, start Desktop, run a
+5. At the final authorized manual gate, enable the feature, start Desktop, run a
    normal CLI command through `--cli`, exercise CSC's existing thirteen-tool
    suite, verify one app-server listener/authority, close Desktop, and prove a
    subsequent `--cli` fails closed. Hosted builds remain the evidence for
-   formats and architectures unavailable locally.
+   non-Nix formats and architectures unavailable locally.
 
 Tests may source verifier functions with explicit fixture roots, but the
 installed executable must hardcode the fixed discovery root and real `/proc`.
