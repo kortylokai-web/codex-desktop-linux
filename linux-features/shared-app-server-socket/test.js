@@ -26,6 +26,20 @@ const socketEnvHook = path.join(__dirname, "socket-env.sh");
 const orphanReaper = path.join(__dirname, "orphan-reaper.js");
 const attachedCli = path.join(__dirname, "attached-cli.sh");
 const unixSocketPathMaxBytes = 107;
+const testRuntimeRoot = fs.mkdtempSync(
+  path.join(os.tmpdir(), "shared-app-server-socket-test-runtime-"),
+);
+const originalRuntimeDir = process.env.XDG_RUNTIME_DIR;
+const originalStateDir = process.env.CODEX_LINUX_APP_STATE_DIR;
+process.env.XDG_RUNTIME_DIR = testRuntimeRoot;
+process.env.CODEX_LINUX_APP_STATE_DIR = testRuntimeRoot;
+test.after(() => {
+  if (originalRuntimeDir == null) delete process.env.XDG_RUNTIME_DIR;
+  else process.env.XDG_RUNTIME_DIR = originalRuntimeDir;
+  if (originalStateDir == null) delete process.env.CODEX_LINUX_APP_STATE_DIR;
+  else process.env.CODEX_LINUX_APP_STATE_DIR = originalStateDir;
+  fs.rmSync(testRuntimeRoot, { recursive: true, force: true });
+});
 
 function makeSocketTempDir(prefix, socketRelativePath = "app-server.sock") {
   for (const root of [...new Set([os.tmpdir(), "/tmp"])]) {
