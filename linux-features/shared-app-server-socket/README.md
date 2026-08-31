@@ -1,143 +1,52 @@
 # Shared App-Server Socket
 
-This opt-in feature makes the Codex app-server used by Desktop available on a
-user-private Unix socket. It does not implement, inspect, filter, or translate
-the app-server protocol.
-
-From an SSH client's point of view, this behaves like an ordinary Codex SSH
-app-server connection. The remote `codex app-server proxy` command still
-provides the same stdio/WebSocket byte stream and the same app-server methods,
-notifications, approvals, and thread authority. The only difference is that the
-proxy attaches to Desktop's existing authority instead of starting a separate
-app-server with a separate thread namespace.
-
-Desktop owns one selected Codex CLI child running `app-server --listen
-unix://PATH`. Desktop connects through the CLI's stock `app-server proxy --sock
-PATH` byte tunnel and its existing WebSocket transport. Other local clients use
-the same stock proxy command to attach to the Unix socket and receive the normal
-WebSocket `/rpc` byte stream. Closing Desktop stops the authority.
-
-The feature preserves the configuration overrides supplied by the official
-local transport. It forwards each opaque override as an ordered `-c` argument
-before the `app-server` subcommand when it starts the shared authority. It does
-not inspect or reconstruct bundled MCP server configuration. Desktop is the
-only authority owner. Other clients attach through the stock proxy and use the
-configuration of that Desktop-owned authority; they do not supply a second
-override list.
-
-The launcher uses the official CLI bundled in `resources/codex` by default.
-An explicit `CODEX_CLI_PATH` remains supported and is preserved by the feature
-hook.
-
-The default socket is scoped by Linux app id under `XDG_RUNTIME_DIR`, preventing
-side-by-side Desktop instances from sharing an authority accidentally. Override
-it with `CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET` when a stable path is required.
-The Codex app-server creates the socket with user-only permissions. A shell
-wrapper may route bare `codex app-server proxy` SSH sessions to this path.
-Keep the socket in a directory accessible only to the owning user. It is a local
-control endpoint and must not be exposed directly over TCP or forwarded as a
-network service.
-
-Authority startup is serialized by an owner-only lock next to the socket. The
-lock records the owning Linux process identity, so a later Desktop launch can
-reclaim it only when that exact process no longer exists. An existing socket is
-probed before recovery: connectable endpoints and live or unverifiable owners
-still fail closed, while an unbound socket inode from the dead owner is removed
-only if its filesystem identity is unchanged.
-Legacy locks without owner metadata remain protected for 15 seconds, longer
-than the authority startup timeout, before they can be reclaimed when no socket
-exists.
-
-The launcher also cleans up a live authority orphaned by a terminated Desktop
-process. Cleanup is limited to a same-user `codex app-server --listen unix://PATH`
-process serving the exact locked socket after direct PID 1 adoption or adoption
-by a verified same-user `systemd --user` manager whose own parent is PID 1. Once
-the authority is ready, its PID and process-start identity are recorded in the
-ownership lock. The lock owner, socket inode, listener identity, command line,
-and process start identities are rechecked before signaling it. Unknown
-listeners, live Desktop owners, changed identities, and pathnames with multiple
-live listener inodes remain untouched. The same cleanup runs after Electron exits
-and before a later cold start.
-
-## SSH setup
-
-Use a stable socket path when the Desktop instance will be reached over SSH:
+This opt-in feature lets a normal Codex CLI attach to Desktop's existing
+app-server:
 
 ```bash
-export CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET="$HOME/.codex/app-server-control/app-server-control.sock"
-codex-desktop
+codex-desktop --cli [Codex CLI arguments]
 ```
 
-Then place a small `codex` wrapper earlier in the SSH user's `PATH`. Set
-`real_codex` to the actual CLI executable, not to the wrapper itself:
+Desktop is the only authority owner. The attached command uses the stock bundled
+Codex CLI and Desktop's verified local connection; it never starts, selects, or
+replaces an app server.
+
+## Enable and update
+
+The feature is disabled by default. Use the native setup flow to add
+`shared-app-server-socket` while preserving every other enabled feature, then
+rebuild and install normally:
 
 ```bash
-#!/usr/bin/env bash
-set -eu
-
-real_codex="/absolute/path/to/real/codex"
-desktop_socket="$HOME/.codex/app-server-control/app-server-control.sock"
-
-if [ "$#" -eq 2 ] && [ "$1" = "app-server" ] && [ "$2" = "proxy" ]; then
-    exec "$real_codex" app-server proxy --sock "$desktop_socket"
-fi
-
-exec "$real_codex" "$@"
+make setup-native
+make install-native
 ```
 
-The upstream SSH transport normally starts its own authority before invoking
-the proxy. Configure the **remote account's login-shell environment** to skip
-that bootstrap when this wrapper is used:
+For manual configuration, add `"shared-app-server-socket"` to the existing
+`enabled` array in the ignored `linux-features/features.json` file. Do not
+replace the other IDs. Native updates rebuild with the current feature
+selection, so keep the ID enabled when updating.
 
-```bash
-export CODEX_SSH_SKIP_APP_SERVER_BOOT=true
-```
+## Use
 
-Put that export in the startup file read by the account's SSH login shell (for
-example `~/.profile` when that is the active login profile). This is remote
-account configuration; setting it only in the local Desktop launcher does not
-propagate it through SSH. Use it only for an account whose wrapper is dedicated
-to this Desktop-owned socket.
+Start and keep Desktop running, then invoke the attached CLI with
+`codex-desktop --cli [Codex CLI arguments]`. The wrapper removes only the
+leading `--cli`; all later arguments are for the stock Codex CLI.
 
-Make the wrapper executable and verify that non-interactive SSH resolves it:
+`--` is a literal boundary: every argument after it is passed unchanged. Before
+that boundary, callers cannot provide an endpoint, socket, authentication,
+authority, or discovery override. With the feature enabled, `--cli -h`,
+`--cli --help`, `--cli -V`, `--cli --version`, and `--cli help ...` run the
+stock help or version path without needing Desktop. Other accepted commands
+require a live, verified Desktop authority.
 
-```bash
-chmod 0755 "$HOME/.local/bin/codex"
-ssh host 'command -v codex'
-ssh host 'printf "%s\n" "$CODEX_SSH_SKIP_APP_SERVER_BOOT"'
-```
+If the feature is disabled, `--cli` fails before Desktop launches. If Desktop
+is absent or its record, socket, lock, or authority is unsafe or mismatched, the
+command fails closed. It does not search for another connection or recover one.
 
-Codex SSH clients can then connect normally; no client-side protocol option or
-special method allowlist is required. Only the exact two-argument proxy command
-is redirected. Interactive CLI commands and all other subcommands continue to
-use the real CLI normally. `CODEX_CLI_PATH` used to launch Desktop must also
-point to the real CLI so Desktop cannot recursively invoke the wrapper.
+## Disable and remove
 
-Enable the feature in the ignored `linux-features/features.json` file:
-
-```json
-{
-  "enabled": ["shared-app-server-socket"]
-}
-```
-
-Then rebuild and launch the app. The feature is disabled by default and does
-not run independently of Desktop.
-
-Run focused tests with:
-
-```bash
-node --test linux-features/shared-app-server-socket/test.js
-```
-
-Set `CODEX_CLI_PATH` to include the stock authority/socket/proxy lifecycle test:
-
-```bash
-CODEX_CLI_PATH="/absolute/path/to/real/codex" node --test linux-features/shared-app-server-socket/test.js
-```
-
-The feature depends on upstream's current local transport factory, WebSocket
-adapter, configuration-override callback, and `app-server proxy` command. The
-descriptor leaves an unknown bundle byte-identical and reports a warning. When
-the feature is enabled, candidate acceptance treats that warning as a failure
-and rejects the build instead of installing a partial patch.
+Remove only `"shared-app-server-socket"` from the existing `enabled` array and
+run `make install-native`. Keep the remaining feature IDs unchanged. The next
+rebuild removes the attached-CLI resource; normal Desktop launch remains
+unchanged.
