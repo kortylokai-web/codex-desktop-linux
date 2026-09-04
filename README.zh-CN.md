@@ -225,7 +225,7 @@ Nix 用户应从 profile、Home Manager 配置或 NixOS module 中删除该包�
 | `remote-control-ui` | 显示实验性 remote-control 设置 | [文档](linux-features/remote-control-ui/README.md) |
 | `remote-mobile-control` | 实验性 Linux remote-host / outbound-control flow | [文档](linux-features/remote-mobile-control/README.md) |
 | `shallow-repository-watches` | 避免临时 repo preview 在主线程递归遍历 | [文档](linux-features/shallow-repository-watches/README.md) |
-| `shared-app-server-socket` | 共享 protocol-transparent Unix app-server socket | [文档](linux-features/shared-app-server-socket/README.md) |
+| `shared-app-server-socket` | 将普通 Codex CLI 附加到 Desktop 共享的 app-server | [文档](linux-features/shared-app-server-socket/README.md) |
 | `thorium-chrome-plugin` | 为官方 Chrome integration 添加 Thorium | [文档](linux-features/thorium-chrome-plugin/README.md) |
 | `tray-usage` | 在 Linux 系统托盘菜单显示剩余用量 | [文档](linux-features/tray-usage/README.md) |
 | `ui-tweaks` | 可选 UI 与交互自定义 | [文档](linux-features/ui-tweaks/README.md) |
@@ -261,6 +261,25 @@ cp linux-features/features.example.json linux-features/features.json
 ```bash
 make install-native
 ```
+
+### 将 Codex CLI 附加到 Desktop
+
+通过 `make setup-native` 启用 `shared-app-server-socket`，并保留现有
+`enabled` 数组中的其他 ID，随后运行 `make install-native`。保持 Desktop
+运行后，执行：
+
+```bash
+codex-desktop --cli [Codex CLI 参数]
+```
+
+Desktop 是唯一的 app-server authority。`--` 会让其后的所有参数原样传递；
+在该边界之前，调用方不能选择 socket、endpoint 或 authority。启用功能后，
+`--cli -h`、`--cli --help`、`--cli -V`、`--cli --version` 和
+`--cli help ...` 无需 Desktop 即可运行。其他附加命令在 Desktop 未运行或
+共享状态不安全时会以安全失败方式拒绝执行（fail closed）。
+
+原生更新会保留当前扩展选择。要移除附加 CLI，只从 `enabled` 中删除
+`shared-app-server-socket`，然后再次运行 `make install-native`。
 
 私有扩展可以放在 gitignored 的 `linux-features/local/<feature-id>/`，并使用相同
 manifest。已知 retired ID 会被忽略以迁移旧配置；任意未知 ID 与拼写错误仍会

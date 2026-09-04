@@ -242,7 +242,7 @@ requirements, known limitations, configuration, and tests.
 | `remote-control-ui` | Expose experimental remote-control settings on Linux | [Docs](linux-features/remote-control-ui/README.md) |
 | `remote-mobile-control` | Experimental Linux remote-host and outbound-control flows | [Docs](linux-features/remote-mobile-control/README.md) |
 | `shallow-repository-watches` | Avoid recursive main-thread walks for transient repository previews | [Docs](linux-features/shallow-repository-watches/README.md) |
-| `shared-app-server-socket` | Share one protocol-transparent Unix app-server socket | [Docs](linux-features/shared-app-server-socket/README.md) |
+| `shared-app-server-socket` | Attach a normal Codex CLI to Desktop's shared app-server | [Docs](linux-features/shared-app-server-socket/README.md) |
 | `thorium-chrome-plugin` | Add Thorium to the official bundled Chrome integration | [Docs](linux-features/thorium-chrome-plugin/README.md) |
 | `tray-usage` | Show usage remaining in the Linux system-tray menu | [Docs](linux-features/tray-usage/README.md) |
 | `ui-tweaks` | Optional visual and interaction customizations | [Docs](linux-features/ui-tweaks/README.md) |
@@ -278,6 +278,26 @@ Then rebuild and install:
 ```bash
 make install-native
 ```
+
+### Attach Codex CLI to Desktop
+
+Enable `shared-app-server-socket` with `make setup-native`, preserving the
+other IDs in the existing `enabled` array, then run `make install-native`. Keep
+Desktop running and invoke:
+
+```bash
+codex-desktop --cli [Codex CLI arguments]
+```
+
+Desktop is the sole app-server authority. `--` keeps every later argument
+literal; callers cannot choose a socket, endpoint, or authority before that
+boundary. With the feature enabled, `--cli -h`, `--cli --help`, `--cli -V`,
+`--cli --version`, and `--cli help ...` work without Desktop. Other attached
+commands fail closed when Desktop is absent or the shared state is unsafe.
+
+Native updates retain the current feature selection. To remove attached CLI,
+delete only `shared-app-server-socket` from `enabled` and run
+`make install-native` again.
 
 Private features may live under the gitignored
 `linux-features/local/<feature-id>/` tree and use the same manifest contract.
