@@ -2,7 +2,7 @@
 
 const fs = require("node:fs");
 const { readMainProcessModules } = require("../../lib/assets.js");
-const { escapeRegExp, findMatchingBrace } = require("../../lib/minified-js.js");
+const { decodeJavaScriptIdentifierEscapesForValidation, escapeRegExp, findMatchingBrace } = require("../../lib/minified-js.js");
 
 const HELPER_NAME = "codexLinuxQuitDialogParent";
 const HELPER_SOURCE =
@@ -63,14 +63,19 @@ function applyQuitConfirmationFocus(source) {
     "codexLinuxQuitPromptPending=!1;" +
     "console.error(`[codex-desktop] Quit confirmation failed`,e)});return";
 
-  if (source.includes(HELPER_NAME) || source.includes("codexLinuxQuitPromptPending")) {
+  const hasReservedBinding = (text) => {
+    const decoded = decodeJavaScriptIdentifierEscapesForValidation(text);
+    return decoded.includes(HELPER_NAME) || decoded.includes("codexLinuxQuitPromptPending");
+  };
+  if (hasReservedBinding(source)) {
     const optionsStart = body.indexOf("let codexLinuxOptions=") + "let codexLinuxOptions=".length;
     const optionsEnd = findMatchingBrace(body, optionsStart);
     const options = body.slice(optionsStart, optionsEnd + 1);
     if (body.startsWith(header + HELPER_SOURCE) &&
         body.includes(beforeQuit[0][0] + guard) &&
         body.includes(asynchronousConfirmation(options)) &&
-        source.split(`function ${HELPER_NAME}(`).length === 2 &&
+        !hasReservedBinding(source.replace(HELPER_SOURCE, "")
+          .replace(guard, "").replace(asynchronousConfirmation(options), "")) &&
         !body.includes("showMessageBoxSync(")) {
       return source;
     }

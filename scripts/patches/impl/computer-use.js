@@ -3,7 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { findMatchingBrace } = require("../lib/minified-js.js");
+const { decodeJavaScriptIdentifierEscapesForValidation, findMatchingBrace } = require("../lib/minified-js.js");
 
 const COMPUTER_USE_UI_ENV_VAR = "CODEX_LINUX_ENABLE_COMPUTER_USE_UI";
 const COMPUTER_USE_UI_SETTINGS_KEY = "codex-linux-computer-use-ui-enabled";
@@ -39,11 +39,14 @@ function applyLinuxComputerUseAvatarCursorBridgePatch(source) {
     "codexLinuxComputerUseCursorComponent",
     "codexLinuxComputerUseCursorSocketPath",
   ];
+  const hasRuntimeReference = (text) => {
+    const decoded = decodeJavaScriptIdentifierEscapesForValidation(text);
+    return runtimeNames.some(name => decoded.includes(name));
+  };
   const runtimeCount = source.split(runtime).length - 1;
   const remainder = source.replace(runtime, "").replace(match.groups.linux ?? "", "");
-  if (match.groups.linux != null && runtimeCount === 1 &&
-      !runtimeNames.some(name => remainder.includes(name))) return source;
-  if (match.groups.linux != null || runtimeNames.some(name => source.includes(name))) {
+  if (match.groups.linux != null && runtimeCount === 1 && !hasRuntimeReference(remainder)) return source;
+  if (match.groups.linux != null || hasRuntimeReference(source)) {
     console.warn("WARN: Incomplete Linux avatar cursor bridge runtime or dispatch guard");
     return source;
   }

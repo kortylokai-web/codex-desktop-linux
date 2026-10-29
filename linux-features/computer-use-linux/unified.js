@@ -1,6 +1,6 @@
 "use strict";
 
-const { escapeRegExp, findMatchingBrace } = require("../../scripts/patches/lib/minified-js.js");
+const { decodeJavaScriptIdentifierEscapesForValidation, escapeRegExp, findMatchingBrace } = require("../../scripts/patches/lib/minified-js.js");
 
 const ID = "[A-Za-z_$][\\w$]*";
 const ROOT_KEY = "codexLinuxCuaPluginRoot";
@@ -23,6 +23,13 @@ function requireUsages(source, name, expected) {
 
 function rootGuard(name) {
   return `if(typeof ${name}!=="string"||${name}.length===0)throw Error("Linux Computer Use trusted plugin root is unavailable");`;
+}
+
+// The verified installed-plugin resolver returns a normalized Linux path with
+// validated, nonempty final segments. Constant suffixes need no native resolver
+// in the builder's minified lexical scope; trim a trailing separator defensively.
+function pluginPath(root, file) {
+  return `${root}.replace(/\\/$/,"")+"/scripts/${file}"`;
 }
 
 function lifecycleContract(source, builder, syncSource) {
@@ -75,7 +82,7 @@ function enclosingFunction(source, targetIndex) {
 }
 
 function freshBuilderRoot(source) {
-  const identifiers = new Set(source.match(/[A-Za-z_$][\w$]*/g));
+  const identifiers = new Set(decodeJavaScriptIdentifierEscapesForValidation(source).match(/[A-Za-z_$][\w$]*/g));
   const base = "codexLinuxCuaPluginRoot";
   let name = base;
   for (let suffix = 1; identifiers.has(name); suffix += 1) name = `${base}${suffix}`;
@@ -135,7 +142,7 @@ function patchUnifiedRuntimeModule(source) {
     "g",
   );
   const patchedServicePattern = new RegExp(
-    `${surfaces}\\.includes\\("computer"\\)&&\\((?<services>[\\w$]+)\\.sky=require\\("node:path"\\)\\.join\\((?<pluginRoot>[\\w$]+),"scripts","native-service\\.mjs"\\)\\)`,
+    `${surfaces}\\.includes\\("computer"\\)&&\\((?<services>[\\w$]+)\\.sky=(?<pluginRoot>${ID})${escapeRegExp(pluginPath("", "native-service.mjs"))}\\)`,
     "g",
   );
   const currentServices = [...builderSource.matchAll(currentServicePattern)];
@@ -152,7 +159,7 @@ function patchUnifiedRuntimeModule(source) {
   );
   const patchedBannerPattern = new RegExp(
     `CUA_REPL_ENABLED_SURFACES:${surfaces}\\.join\\(","\\),CODEX_LINUX_CUA_HOST_SOCKET:process\\.env\\.CODEX_LINUX_CUA_HOST_SOCKET,` +
-      `NODE_REPL_JS_BANNER:\`await import\\("@oai/cua/tinyskyAlt"\\);await\\(await import\\(\\$\\{JSON\\.stringify\\(require\\("node:path"\\)\\.join\\((?<pluginRoot>[\\w$]+),"scripts","native-client\\.mjs"\\)\\)\\}\\)\\)\\.installLinuxComputerUse\\(cua\\);\`,` +
+      `NODE_REPL_JS_BANNER:\`await import\\("@oai/cua/tinyskyAlt"\\);await\\(await import\\(\\$\\{JSON\\.stringify\\((?<pluginRoot>${ID})${escapeRegExp(pluginPath("", "native-client.mjs"))}\\)\\}\\)\\)\\.installLinuxComputerUse\\(cua\\);\`,` +
       audioEnvironmentPattern +
       `\\[(?<constants>[\\w$]+)\\.(?<constant>[\\w$]+)\\]:JSON\\.stringify\\((?<services>[\\w$]+)\\)`,
     "g",
@@ -227,7 +234,7 @@ function patchUnifiedRuntimeModule(source) {
     {
       index: builderOwner.start + service.index,
       length: service[0].length,
-      replacement: `${surfaces}.includes("computer")&&(${service.groups.services}.sky=require("node:path").join(${builderRoot},"scripts","native-service.mjs"))`,
+      replacement: `${surfaces}.includes("computer")&&(${service.groups.services}.sky=${pluginPath(builderRoot, "native-service.mjs")})`,
     },
     {
       index: builderOwner.start + banner.index,
@@ -235,7 +242,7 @@ function patchUnifiedRuntimeModule(source) {
       replacement:
       `CUA_REPL_ENABLED_SURFACES:${surfaces}.join(","),` +
         `CODEX_LINUX_CUA_HOST_SOCKET:process.env.CODEX_LINUX_CUA_HOST_SOCKET,` +
-        `NODE_REPL_JS_BANNER:\`await import("@oai/cua/tinyskyAlt");await(await import(\${JSON.stringify(require("node:path").join(${builderRoot},"scripts","native-client.mjs"))})).installLinuxComputerUse(cua);\`,` +
+        `NODE_REPL_JS_BANNER:\`await import("@oai/cua/tinyskyAlt");await(await import(\${JSON.stringify(${pluginPath(builderRoot, "native-client.mjs")})})).installLinuxComputerUse(cua);\`,` +
         banner.groups.audio +
         `[${banner.groups.constants}.${banner.groups.constant}]:JSON.stringify(${banner.groups.services})`,
     },

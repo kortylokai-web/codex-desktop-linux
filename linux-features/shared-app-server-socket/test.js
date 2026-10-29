@@ -2039,6 +2039,63 @@ test("patch rejects incomplete or misplaced existing shared transport injections
   }
 });
 
+test("patch rejects escaped shared transport constructor references outside its dispatch", async t => {
+  const source = syntheticBundle();
+  const patched = applySharedAppServerSocketPatch(source);
+  assert.notEqual(patched, source);
+  const extra = String.raw`if(e.extraBridge)return new CodexLinuxSharedAppServerSocketTransp\u006frt(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,async()=>[]);`;
+  for (const original of [source, patched]) {
+    await t.test(original === source ? "before injection" : "after injection", () => {
+      const damaged = original.replace('if("remote-control"===e.transportKind)', extra + 'if("remote-control"===e.transportKind)');
+      assert.doesNotThrow(() => new vm.Script(damaged));
+      const factory = damaged.slice(damaged.indexOf("function b5(e)"), damaged.indexOf("class AfterFactory"));
+      const constructed = [];
+      class Bridge { constructor(...args) { constructed.push(args); } }
+      const create = vm.runInNewContext(`${factory};b5`, {
+        _C: () => null, process: { env: {} }, CodexLinuxSharedAppServerSocketTransport: Bridge,
+      });
+      assert.ok(create({ hostConfig: {}, extraBridge: true }) instanceof Bridge);
+      assert.equal(constructed.length, 1, "escaped reference constructs the reserved transport");
+      const warnings = [];
+      const originalWarn = console.warn;
+      console.warn = (...args) => warnings.push(args.join(" "));
+      try {
+        assert.equal(applySharedAppServerSocketPatch(damaged), damaged);
+      } finally { console.warn = originalWarn; }
+      assert.match(warnings.join("\n"), /incomplete or ambiguous shared app-server socket patch state/i);
+    });
+  }
+});
+
+test("patch rejects a factory-local binding that shadows the shared transport class", async t => {
+  const source = syntheticBundle();
+  const patched = applySharedAppServerSocketPatch(source);
+  assert.notEqual(patched, source);
+  const extra = String.raw`let CodexLinuxSharedAppServerSocketTransp\u006frt=class{constructor(){this.overridden=true}};`;
+  for (const original of [source, patched]) {
+    await t.test(original === source ? "before injection" : "after injection", () => {
+      const damaged = original.replace('if("remote-control"===e.transportKind)return new Remote(e);',
+        'if("remote-control"===e.transportKind)return new Remote(e);' + extra);
+      assert.doesNotThrow(() => new vm.Script(damaged));
+      if (original === patched) {
+        const factory = damaged.slice(damaged.indexOf("function b5(e)"), damaged.indexOf("class AfterFactory"));
+        const create = vm.runInNewContext(`${factory};b5`, {
+          _C: () => null, process: { env: { CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET: "/inert/socket" } },
+          n: { no: () => false },
+        });
+        assert.equal(create({ hostConfig: { kind: "local", id: "local" } }).overridden, true,
+          "the escaped lexical binding replaces the canonical injected transport");
+      }
+      const warnings = [];
+      const originalWarn = console.warn;
+      console.warn = (...args) => warnings.push(args.join(" "));
+      try { assert.equal(applySharedAppServerSocketPatch(damaged), damaged); }
+      finally { console.warn = originalWarn; }
+      assert.match(warnings.join("\n"), /incomplete or ambiguous shared app-server socket patch state/i);
+    });
+  }
+});
+
 test("patch rejects retired, duplicate, and mixed transport layouts", () => {
   const current = syntheticBundle();
   const patched = applySharedAppServerSocketPatch(current);

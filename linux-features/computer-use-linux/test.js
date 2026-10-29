@@ -253,14 +253,25 @@ test("desktop feature gate enables Linux in the unique current Windows override"
 });
 
 test("desktop feature gate rejects missing, duplicate, and partial current contracts byte-identically", () => {
-  const current = "function features(e,n,r){let i=\"win32\"===r&&\"1\"===n.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE?{...e,computerUse:!0}:e;return i}";
+  const current = "function features(e,n,r){let i=\"win32\"===r&&\"1\"===n.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE?{...e,computerUse:!0}:e,o=i;return o}";
   const patched = applyLinuxComputerUseFeaturePatch(current);
+  assert.notEqual(patched, current);
+  const descriptor = {
+    ...descriptors.find(({ id }) => id === "ui-feature"),
+    featureId: "computer-use-linux", sourceKind: "feature",
+  };
   for (const source of [
     current + current,
     patched + current,
     current.replace("computerUse:!0", "computerUse:!1"),
+    patched.replace('"linux"===r', '"linux"===other'),
   ]) {
-    assert.equal(applyLinuxComputerUseFeaturePatch(source), source);
+    const report = createPatchReport();
+    report.enabledFeatures = ["computer-use-linux"];
+    const result = applyMainBundlePatchDescriptors(source, [descriptor], {}, report);
+    assert.equal(result.patchedSource, source);
+    assert.equal(result.warnings.length, 1);
+    assert.equal(enabledFeatureFailuresFromReport(report).length, 1);
   }
 });
 

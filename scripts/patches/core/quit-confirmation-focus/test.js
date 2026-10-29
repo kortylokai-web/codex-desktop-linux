@@ -9,6 +9,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const {
+  HELPER_SOURCE,
   applyQuitConfirmationFocus,
   descriptors,
   patchRequiredCoreBlockers,
@@ -248,6 +249,39 @@ test("rejects a partial patch instead of treating it as already applied", () => 
   const patched = applyQuitConfirmationFocus(OFFICIAL_BUNDLE);
   assert.throws(() => applyQuitConfirmationFocus(
     patched.replace("if(codexLinuxQuitPromptPending)", "if(false)")), /Incomplete Quit confirmation focus patch/);
+});
+
+test("required core acceptance rejects reserved Quit bindings outside its complete runtime", async t => {
+  const patched = applyQuitConfirmationFocus(OFFICIAL_BUNDLE);
+  assert.notEqual(patched, OFFICIAL_BUNDLE);
+  for (const [name, original, extra] of [
+    ["escaped parent override", patched, String.raw`function codexLinuxQuitDialogP\u0061rent(){return null}`],
+    ["escaped pending state mutation", patched, String.raw`codexLinuxQuitPromptP\u0065nding=!0;`],
+    ["raw pending state mutation", patched, "codexLinuxQuitPromptPending=!0;"],
+    ["escaped parent collision before injection", OFFICIAL_BUNDLE, String.raw`function codexLinuxQuitDialogP\u{61}rent(){return null}`],
+    ["escaped pending collision before injection", OFFICIAL_BUNDLE, String.raw`let codexLinuxQuitPromptP\u0065nding=!0;`],
+  ]) {
+    await t.test(name, () => {
+      const damaged = original === patched
+        ? original.replace(HELPER_SOURCE, HELPER_SOURCE + extra)
+        : original.replace("let y=!1", extra + "let y=!1");
+      assert.notEqual(damaged, original);
+      assert.doesNotThrow(() => new vm.Script(damaged));
+      if (name === "escaped parent override") {
+        // Registration wires events, so evaluate the isolated body declaration
+        // instead: duplicate function bindings are hoisted in the same scope.
+        assert.equal(vm.runInNewContext(`(function(){${HELPER_SOURCE}${extra};return codexLinuxQuitDialogParent()})()`), null);
+      }
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "quit-reserved-binding-"));
+      t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+      const build = path.join(root, ".vite", "build");
+      fs.mkdirSync(build, { recursive: true });
+      const file = path.join(build, "quit.js");
+      fs.writeFileSync(file, damaged);
+      assert.throws(() => patchRequiredCoreBlockers(root), /Incomplete Quit confirmation focus patch/);
+      assert.equal(fs.readFileSync(file, "utf8"), damaged);
+    });
+  }
 });
 
 test("applies the required Quit repair to the uniquely anchored signed module", {

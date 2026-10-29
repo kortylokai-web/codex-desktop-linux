@@ -9,6 +9,7 @@ const descriptors = require("./patch.js");
 // Windows/macOS service availability, followed by independent browser selection.
 const fs = require("node:fs");
 const selector = fs.readFileSync(path.join(__dirname, "fixtures/current-unified.js"), "utf8");
+const currentBanner = selector.match(/CUA_REPL_ENABLED_SURFACES:s\.join\(","\),.*?\[constants\.Il\]:JSON\.stringify\(l\)/u)[0];
 function patch(source) {
   return descriptors.find(descriptor => descriptor.id === "unified-runtime").apply(source);
 }
@@ -22,7 +23,7 @@ test("unified Linux native selection uses the native setting and retains browser
   assert.deepEqual(surfaces(patch(selector), "linux"), ["browser", "computer"]);
   assert.match(patch(selector), /build\(\{\.\.\.e,accessBootstrapPath:bootstrap\},i\)/);
   assert.match(patch(selector), /function build\(\{browserBackends:b,deferTools:d,surfaces:s,nodeRepl:n,accessBootstrapPath:a\},codexLinuxCuaPluginRoot\)/);
-  assert.match(patch(selector), /\.sky=require\("node:path"\)\.join\(codexLinuxCuaPluginRoot,"scripts","native-service\.mjs"\)/);
+  assert.ok(patch(selector).includes('.sky=codexLinuxCuaPluginRoot.replace(/\\/$/,"")+"/scripts/native-service.mjs"'));
   assert.match(patch(selector), /NODE_REPL_JS_BANNER:.*native-client\.mjs/);
   assert.match(patch(selector), /CODEX_LINUX_CUA_HOST_SOCKET:process\.env\.CODEX_LINUX_CUA_HOST_SOCKET/);
 });
@@ -60,19 +61,19 @@ test("unified mode rejects appended gates and changed companion selectors", () =
 
 test("unified service patch scopes the plugin root and current env-key alias to its owner", () => {
   const current =
-    "function unrelated(){let other=path().join(otherRoot,`.mcp.json`);return other}" +
+    'function unrelated(){let other=path().join(otherRoot,".mcp.json");return other}' +
     selector.replace("[constants.Il]", "[constants.Gl]");
   const patched = patch(current);
 
-  assert.match(patched, /require\("node:path"\)\.join\(codexLinuxCuaPluginRoot,"scripts","native-service\.mjs"\)/u);
+  assert.ok(patched.includes('codexLinuxCuaPluginRoot.replace(/\\/$/,"")+"/scripts/native-service.mjs"'));
   assert.match(patched, /\[constants\.Gl\]:JSON\.stringify\(l\)/u);
-  assert.doesNotMatch(patched, /require\("node:path"\)\.join\(otherRoot,"scripts","native-service\.mjs"\)/u);
+  assert.ok(!patched.includes('otherRoot.replace(/\\/$/,"")+"/scripts/native-service.mjs"'));
   assert.equal(patch(patched), patched);
 });
 
 test("unified banner patch edits only the validated service owner", () => {
   const unrelatedBanner =
-    "function unrelated(e){let constants={},l={};return{env:{CUA_REPL_ENABLED_SURFACES:e.surfaces.join(`,`),[constants.Il]:JSON.stringify(l)}}}";
+    `function unrelated(s){let constants={},l={},n={};return{env:{${currentBanner}}}}`;
   const current = unrelatedBanner + selector;
   const patched = patch(current);
 
@@ -81,10 +82,9 @@ test("unified banner patch edits only the validated service owner", () => {
 });
 
 test("unified banner patch rejects duplicate banners inside the service owner", () => {
-  const duplicate = selector.replace(
-    "[constants.Il]:JSON.stringify(l)",
-    "CUA_REPL_ENABLED_SURFACES:s.join(`,`),[constants.Il]:JSON.stringify(l),duplicate:{CUA_REPL_ENABLED_SURFACES:s.join(`,`),[constants.Il]:JSON.stringify(l)}",
-  );
+  assert.notEqual(patch(selector), selector);
+  const duplicate = selector.replace(currentBanner, `${currentBanner},duplicate:{${currentBanner}}`);
+  assert.equal(duplicate.split(currentBanner).length - 1, 2);
 
   assert.throws(() => patch(duplicate), /unified.*contract/i);
 });
@@ -132,15 +132,39 @@ test("unified helper avoids existing generated names in locals and nested scopes
   assert.equal(patch(patched), patched);
 });
 
+test("unified helper avoids an escaped lexical binding when allocating its plugin root", async () => {
+  const current = selector.replace("let l={};return s.includes",
+    String.raw`let codexLinuxCuaPluginR\u006fot=1;let l={};return s.includes`);
+  assert.notEqual(patch(selector), selector);
+  assert.doesNotThrow(() => new vm.Script(current));
+  const patched = patch(current);
+  assert.doesNotThrow(() => new vm.Script(patched));
+  assert.equal(patch(patched), patched);
+  const { initialize, threadConfig } = vm.runInNewContext(`${patched};({initialize,threadConfig})`, {
+    lookup: () => ({ plugin: { localVersion: "verified", name: "cua" }, marketplace: { name: "bundled" } }),
+    path: () => path,
+    constants: { Il: "services", Kt: () => "/trusted-plugin" },
+    require, process: { env: {} },
+  });
+  const selection = {
+    browserBackends: ["native"], cuaReplSurfaces: ["computer"], nodeRepl: { env: {} },
+    desktopFeatureAvailability: { deferCuaTools: true },
+  };
+  const cached = await initialize({ selection });
+  const result = await threadConfig({ cached, features: { browserUseTinysky: true } });
+  assert.equal(JSON.parse(result.env.services).sky, "/trusted-plugin/scripts/native-service.mjs");
+  assert.ok(result.env.NODE_REPL_JS_BANNER.includes('/trusted-plugin/scripts/native-client.mjs'));
+});
+
 test("unified helper validates caller and helper root relationships separately", () => {
   const patched = patch(selector);
   assert.throws(() => patch(patched.replace("accessBootstrapPath:bootstrap},i)", "accessBootstrapPath:bootstrap},other)")), /unified.*contract/i);
   assert.throws(() => patch(patched.replace(
-    'join(codexLinuxCuaPluginRoot,"scripts","native-service.mjs")',
-    'join(other,"scripts","native-service.mjs")')), /unified.*contract/i);
+    'codexLinuxCuaPluginRoot.replace(/\\/$/,"")+"/scripts/native-service.mjs"',
+    'other.replace(/\\/$/,"")+"/scripts/native-service.mjs"')), /unified.*contract/i);
   assert.throws(() => patch(patched.replace(
-    'join(codexLinuxCuaPluginRoot,"scripts","native-client.mjs")',
-    'join(other,"scripts","native-client.mjs")')), /unified.*contract/i);
+    'codexLinuxCuaPluginRoot.replace(/\\/$/,"")+"/scripts/native-client.mjs"',
+    'other.replace(/\\/$/,"")+"/scripts/native-client.mjs"')), /unified.*contract/i);
 });
 
 test("unified thread configuration retains the trusted root per cached connection", async () => {
@@ -223,7 +247,7 @@ test("unified propagation rejects missing, ambiguous, or changed builder consume
 });
 
 
-test("unified builder resolves its own path module despite upstream alias shadowing", () => {
+test("unified constant subpaths tolerate ordinary upstream path aliases", () => {
   for (const binding of ["b", "d", "s", "n", "a"]) {
     const start = selector.indexOf("function build(");
     const end = selector.indexOf("async function initialize(");
@@ -241,4 +265,46 @@ test("Rspack modules keep unrelated aliases and class private names outside buil
   assert.notEqual(patched, current);
   assert.equal(patch(patched), patched);
   assert.doesNotThrow(() => new vm.Script(patched));
+});
+
+
+test("unified emitted native and browser configuration cannot capture a shadowed native resolver", async () => {
+  const start = selector.indexOf("function build(");
+  const end = selector.indexOf("async function initialize(");
+  const builderShadow = selector.slice(0, start) +
+    selector.slice(start, end).replace("browserBackends:b", "browserBackends:require") + selector.slice(end);
+  const cases = [
+    builderShadow,
+    `exports.modules={1(e,t,require){"use strict";${selector};t.api={initialize,threadConfig}}}`,
+    `exports.modules={1(e,t,r){"use strict";let require=null;${selector};t.api={initialize,threadConfig}}}`,
+  ];
+  for (const current of cases) {
+    const patched = patch(current);
+    assert.doesNotThrow(() => new vm.Script(patched));
+    assert.equal(patch(patched), patched);
+    const context = {
+      exports: {}, require, path: () => path,
+      lookup: () => ({ plugin: { localVersion: "verified", name: "cua" }, marketplace: { name: "bundled" } }),
+      constants: { Il: "services", Kt: () => "/trusted-plugin/" }, process: { env: {} },
+    };
+    let api;
+    if (current.startsWith("exports.modules")) {
+      vm.runInNewContext(patched, context);
+      const output = {};
+      context.exports.modules[1]({}, output, null);
+      api = output.api;
+    } else api = vm.runInNewContext(`${patched};({initialize,threadConfig})`, context);
+    for (const surfaces of [["computer"], ["browser"]]) {
+      const selection = {
+        browserBackends: ["native"], cuaReplSurfaces: surfaces, nodeRepl: { env: {} },
+        desktopFeatureAvailability: { deferCuaTools: true },
+      };
+      const cached = await api.initialize({ selection });
+      const config = await api.threadConfig({ cached, features: { browserUseTinysky: true } });
+      assert.equal(config.env.CUA_REPL_ENABLED_SURFACES, surfaces[0]);
+      assert.equal(JSON.parse(config.env.services).sky,
+        surfaces[0] === "computer" ? "/trusted-plugin/scripts/native-service.mjs" : undefined);
+      assert.ok(config.env.NODE_REPL_JS_BANNER.includes('"/trusted-plugin/scripts/native-client.mjs"'));
+    }
+  }
 });

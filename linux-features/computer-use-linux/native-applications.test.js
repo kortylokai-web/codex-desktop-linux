@@ -107,3 +107,27 @@ test("native metadata rejects duplicate owners and partial or damaged contracts"
     patched.replace("if(process.platform===`linux`)return codexLinuxNativeApplications();", ""),
   ]) assert.throws(() => patch(changed), /native Applications contract drift/);
 });
+
+
+test("native metadata refuses a helper declaration that overrides its Linux factory", () => {
+  const patched = patch(fixture);
+  const overridden = patched + "function codexLinuxNativeApplications(){return{duplicate:true}}";
+  const service = vm.runInNewContext(`${overridden};new TestHandler().nativeApplications`, {
+    process: { platform: "linux" },
+  });
+  assert.equal(service.duplicate, true, "the extra declaration actually replaces the Linux service");
+  assert.throws(() => patch(overridden), /native Applications contract drift/);
+});
+
+test("native metadata rejects residual generated helper consumers and clean-state collisions", () => {
+  for (const source of [fixture, patch(fixture)]) {
+    for (const residual of [
+      "function codexLinuxNativeDesktopAppsHome(){return `/other`}",
+      "const alias=codexLinuxNativeDesktopAppIcon;",
+      "codexLinuxNativeApplications=()=>({duplicate:true});",
+      String.raw`function codexLinuxNativeApplic\u0061tions(){return{duplicate:true}}`,
+      String.raw`function codexLinuxNativeDesktopAppsH\u{6f}me(){return '/other'}`,
+
+    ]) assert.throws(() => patch(source + residual), /native Applications contract drift/);
+  }
+});

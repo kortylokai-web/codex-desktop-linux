@@ -1,5 +1,6 @@
 "use strict";
 
+const { decodeJavaScriptIdentifierEscapesForValidation } = require("../../scripts/patches/lib/minified-js.js");
 
 const MARKER = "/* linux-native-applications */";
 const FACTORY = /nativeApplications=\(function\(\)\{(?<patched>\/\* linux-native-applications \*\/if\(process\.platform===`linux`\)return codexLinuxNativeApplications\(\);)?(?<original>if\("darwin"===process\.platform\|\|"win32"===process\.platform\)return\{getByBundleId:async (?<id>[\w$]+)=>await (?<lookup>[\w$]+)\(\k<id>\)\?\?await \(0,(?<module>[\w$]+)\.[\w$]+\)\(\k<id>\),list:\k<module>\.[\w$]+,getIcon:async\(\{appPath:(?<app>[\w$]+),size:(?<size>[\w$]+)\}\)=>"medium"===\k<size>\?\{iconSmall:null,iconMedium:await [\w$]+\(\k<app>\)\}:\{iconSmall:await [\w$]+\(\k<app>\)\}\})\}\)\(\)/g;
@@ -49,6 +50,11 @@ function runtimeSource() {
     "getIcon:async({appPath:e,size:t})=>{let{iconSmall:n}=await codexLinuxNativeDesktopAppIcon({appPath:e});return t===`medium`?{iconSmall:null,iconMedium:n||null}:{iconSmall:n||null}}}}";
 }
 
+function hasHelperReference(source) {
+  const decoded = decodeJavaScriptIdentifierEscapesForValidation(source);
+  return /codexLinuxNative(?:Applications|DesktopApp)/u.test(decoded);
+}
+
 function applyNativeApplicationsPatch(source) {
   const fail = () => { throw new Error("Linux native Applications contract drift: missing, duplicate, or partial native metadata owner"); };
   const owners = [...source.matchAll(FACTORY)];
@@ -61,9 +67,13 @@ function applyNativeApplicationsPatch(source) {
   const runtimeCount = source.split(runtime).length - 1;
   if (owner.groups.patched != null) {
     if (markerCount !== 1 || runtimeCount !== 1) fail();
+    // The complete runtime is necessary but insufficient: another hoisted
+    // declaration or assignment can replace it while retaining the exact bytes.
+    const residual = source.replace(runtime, "").replace(owner.groups.patched, "");
+    if (hasHelperReference(residual)) fail();
     return source;
   }
-  if (markerCount !== 0 || runtimeCount !== 0 || source.includes("codexLinuxNativeApplications") || source.includes("codexLinuxNativeDesktopApps(")) fail();
+  if (markerCount !== 0 || runtimeCount !== 0 || hasHelperReference(source)) fail();
   const replacement = `nativeApplications=(function(){${MARKER}if(process.platform===\`linux\`)return codexLinuxNativeApplications();${owner.groups.original}})()`;
   const patched = source.slice(0, owner.index) + replacement + source.slice(owner.index + owner[0].length);
   const strict = patched.match(/^(?:"use strict"|'use strict');/);

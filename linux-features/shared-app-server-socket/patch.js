@@ -1,7 +1,7 @@
 "use strict";
 
 const { readSocketPath } = require("./socket-path.js");
-const { escapeRegExp, findMatchingBrace } = require("../../scripts/patches/lib/minified-js.js");
+const { decodeJavaScriptIdentifierEscapesForValidation, escapeRegExp, findMatchingBrace } = require("../../scripts/patches/lib/minified-js.js");
 
 const IDENT = "[A-Za-z_$][\\w$]*";
 
@@ -155,10 +155,11 @@ function sharedTransportClassSource(symbols) {
 }
 
 function applySharedAppServerSocketPatch(source) {
-  const markerCount = source.split("class CodexLinuxSharedAppServerSocketTransport").length - 1;
+  const detectionSource = decodeJavaScriptIdentifierEscapesForValidation(source);
+  const markerCount = detectionSource.split("class CodexLinuxSharedAppServerSocketTransport").length - 1;
   const symbols = findTransportSymbols(source);
-  const dispatchCount = source.split("new CodexLinuxSharedAppServerSocketTransport(").length - 1;
-  if (markerCount > 1 || (markerCount === 0 && dispatchCount !== 0) ||
+  const dispatchCount = detectionSource.split("new CodexLinuxSharedAppServerSocketTransport(").length - 1;
+  if (markerCount > 1 || (markerCount === 0 && detectionSource.includes("CodexLinuxSharedAppServerSocketTransport")) ||
       (markerCount === 1 && (symbols == null || dispatchCount !== 1))) {
     console.warn("WARN: Found incomplete or ambiguous shared app-server socket patch state");
     return source;
@@ -202,7 +203,9 @@ function applySharedAppServerSocketPatch(source) {
     // Validate the complete generated class and the unique dispatch using the
     // native callback, then reconstruct the factory to verify its placement.
     if (source.slice(factoryStart - classSource.length, factoryStart) !== classSource ||
-        !factorySource.includes(dispatchSource)) {
+        !factorySource.includes(dispatchSource) ||
+        decodeJavaScriptIdentifierEscapesForValidation(source.replace(classSource, "")
+          .replace(dispatchSource, "")).includes("CodexLinuxSharedAppServerSocketTransport")) {
       console.warn("WARN: Found incomplete or ambiguous shared app-server socket patch state");
       return source;
     }
