@@ -876,17 +876,6 @@ function syntheticBundle() {
   ].join("");
 }
 
-test("patch follows the current Rspack transport dependencies across namespaces and inline constants", () => {
-  assert.deepEqual(findTransportSymbols(syntheticBundle()), {
-    webSocketNamespace: "ws", webSocketClass: "kn", webSocketUrl: '\"ws://localhost/rpc\"',
-    namespace: "n", codecClass: "Codec", adapterClass: "On", keepAlive: "Dn",
-    maximumFrameBytes: "0x1000000", maximumFrameHeader: '\"frame-limit\"',
-  });
-  const patched = applySharedAppServerSocketPatch(syntheticBundle());
-  assert.notEqual(patched, syntheticBundle());
-  new vm.Script(patched);
-});
-
 test("shared-app-server-socket stays disabled until explicitly enabled", () => {
   withFeatureConfig([], (featuresRoot) => {
     assert.deepEqual(loadLinuxFeaturePatchDescriptors({ featuresRoot }), []);
@@ -1800,9 +1789,10 @@ async function connectPatchedBundle(source = syntheticBundle(), {
   const stream = new PassThrough();
   class WebSocket extends EventEmitter {
     readyState = 0;
-    constructor(_url, options) {
+    constructor(url, options) {
       super();
       socket = this;
+      diagnostics.webSocketUrl = url;
       options.createConnection();
       queueMicrotask(() => {
         try {
@@ -1903,6 +1893,20 @@ test("patched current bundle returns an open connection adapter with codec messa
   assert.equal(event.code, 1000);
   assert.equal(connection.readyState, 3);
   assert.equal(stream.destroyed, true);
+});
+
+test("patched connection preserves the upstream URL and default limit without a frame-limit header", async () => {
+  const diagnostics = {};
+  const { connection } = await connectPatchedBundle(syntheticBundle(), {
+    handshakeHeaders: {}, diagnostics,
+  });
+  try {
+    assert.equal(diagnostics.webSocketUrl, "ws://localhost/rpc");
+    connection.send("x".repeat(0x1000000));
+    assert.throws(() => connection.send("x".repeat(0x1000001)), /frame too large/);
+  } finally {
+    await connection.close(1000, "finished");
+  }
 });
 
 test("patched connection reports pong timeout while releasing the proxy stream", async () => {

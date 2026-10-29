@@ -247,16 +247,28 @@ test("unified propagation rejects missing, ambiguous, or changed builder consume
 });
 
 
-test("unified constant subpaths tolerate ordinary upstream path aliases", () => {
-  for (const binding of ["b", "d", "s", "n", "a"]) {
-    const start = selector.indexOf("function build(");
-    const end = selector.indexOf("async function initialize(");
-    const builder = selector.slice(start, end).replace(new RegExp(`\\b${binding}\\b`, "g"), "path");
-    const shadowed = selector.slice(0, start) + builder + selector.slice(end);
-    const patched = patch(shadowed);
-    assert.doesNotThrow(() => new vm.Script(patched));
-    assert.equal(patch(patched), patched);
-  }
+test("unified configuration tolerates an upstream parameter shadowing the path module", async () => {
+  const shadowed = selector.replace("browserBackends:b", "browserBackends:path");
+  const patched = patch(shadowed);
+  assert.notEqual(patched, shadowed);
+  assert.equal(patch(patched), patched);
+  const { initialize, threadConfig } = vm.runInNewContext(`${patched};({initialize,threadConfig})`, {
+    lookup: () => ({ plugin: { localVersion: "verified", name: "cua" }, marketplace: { name: "bundled" } }),
+    path: () => path, constants: { Il: "services", Kt: () => "/trusted-plugin" },
+    require, process: { env: {} },
+  });
+  const selection = {
+    browserBackends: ["native"], cuaReplSurfaces: ["browser", "computer"], nodeRepl: { env: {} },
+    desktopFeatureAvailability: { deferCuaTools: true },
+  };
+  const cached = await initialize({ selection });
+  assert.equal(cached.cuaReplEnabled, true);
+  const config = await threadConfig({ cached, features: { browserUseTinysky: true } });
+  assert.deepEqual(JSON.parse(config.env.services), {
+    browser: "@oai/browser-desktop/service", sky: "/trusted-plugin/scripts/native-service.mjs",
+  });
+  assert.equal(config.env.NODE_REPL_JS_BANNER,
+    'await import("@oai/cua/tinyskyAlt");await(await import("/trusted-plugin/scripts/native-client.mjs")).installLinuxComputerUse(cua);');
 });
 
 test("Rspack modules keep unrelated aliases and class private names outside builder consumers", () => {

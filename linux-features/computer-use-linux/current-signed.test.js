@@ -7,6 +7,8 @@ const test = require("node:test");
 const vm = require("node:vm");
 const descriptors = require("./patch.js");
 const { findMainBundle } = require("../../scripts/patches/lib/assets.js");
+const { applyMainBundlePatchDescriptors } = require("../../scripts/patches/engine.js");
+const { createPatchReport, enabledFeatureFailuresFromReport } = require("../../scripts/lib/patch-report.js");
 
 test("native metadata stays feature-owned without retired core IPC helpers", () => {
   const source = fs.readFileSync(path.join(__dirname, "../../scripts/patches/impl/computer-use.js"), "utf8");
@@ -46,11 +48,21 @@ for (const id of ["unified-runtime", "avatar-cursor", "ui-feature", "plugin-gate
 test("current signed main descriptors compose and remain idempotent", { skip: !process.env.CODEX_SIGNED_EXTRACTED_APP }, () => {
   const main = findMainBundle(process.env.CODEX_SIGNED_EXTRACTED_APP);
   const original = fs.readFileSync(path.join(main.buildDir, main.mainBundle), "utf8");
-  const patches = descriptors.filter(descriptor => descriptor.phase === "main-bundle").sort((a,b) => a.order-b.order);
-  const apply = source => patches.reduce((current, descriptor) => descriptor.apply(current), source);
-  const patched = apply(original);
+  const patches = descriptors.filter(descriptor => descriptor.phase === "main-bundle")
+    .map(descriptor => ({ ...descriptor, featureId: "computer-use-linux", sourceKind: "feature" }))
+    .sort((a, b) => a.order - b.order);
+  const apply = (source, expectedStatus) => {
+    const report = createPatchReport();
+    report.enabledFeatures = ["computer-use-linux"];
+    const result = applyMainBundlePatchDescriptors(source, patches, {}, report);
+    assert.deepEqual(enabledFeatureFailuresFromReport(report), []);
+    assert.deepEqual(report.patches.map(({ name, status }) => ({ name, status })),
+      patches.map(({ id }) => ({ name: id, status: expectedStatus })));
+    return result.patchedSource;
+  };
+  const patched = apply(original, "applied");
   assert.equal(patched !== original, true);
-  assert.equal(apply(patched), patched);
+  assert.equal(apply(patched, "already-applied"), patched);
   assert.doesNotThrow(() => new vm.Script(patched));
 });
 
