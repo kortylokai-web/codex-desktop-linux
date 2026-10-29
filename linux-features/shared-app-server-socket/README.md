@@ -174,11 +174,7 @@ CODEX_CLI_PATH="/absolute/path/to/real/codex" node --test linux-features/shared-
 ```
 
 The feature depends on upstream's current local transport factory, WebSocket
-codec and connection adapter, configuration-override callback, and `app-server
-proxy` command. Its Rspack matcher traces the returned SSH connection across
-separate WebSocket and transport imports and preserves its inline handshake
-constants. The local factory callback is copied in full, including base, secret
-auth-storage, and Desktop configuration overrides. The
+adapter, configuration-override callback, and `app-server proxy` command. The
 descriptor leaves an unknown bundle byte-identical and reports a warning. When
 the feature is enabled, candidate acceptance treats that warning as a failure
 and rejects the build instead of installing a partial patch.

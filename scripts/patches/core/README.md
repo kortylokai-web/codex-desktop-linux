@@ -20,12 +20,8 @@ The required patch selects the focused visible window, then the visible primary
 window, then another visible live window; it opens a parented asynchronous
 dialog and guards duplicate `before-quit` events until the user responds.
 
-The patch discovers the owning main-process module semantically, independently
-of its Rspack chunk filename. It validates the anonymous Quit lifecycle function
-and confirmation before writing. The helper and prompt state stay inside that
-function, preserving its expression context and upstream lifecycle handlers.
-Tests cover approval, cancellation, reentrancy, window selection, dialog failure,
-fail-closed matching, idempotence, and application to both signed architectures.
+The adjacent regression tests cover approval, cancellation, reentrancy, window
+selection, dialog failure, fail-closed semantic matching, and idempotence.
 The descriptor applies to every portable payload, regardless of build host.
 Retire it when the signed stable bundle resolves the focus blocker.
 
@@ -33,8 +29,6 @@ The former shell environment startup deferral is retired. In both signed
 `26.1027.30824` architectures, the early bootstrap awaits `app.whenReady()` on
 Linux before dynamically importing the network permissions initializer. That
 initializer then invokes the shell environment startup loader. This ordering
-removes the earlier pre-Chromium shell spawn that exposed libuv's SIGCHLD
-handler to replacement during browser initialization. No extra event-loop
-turn is injected. This retirement is based on the verified signed startup
-source chain; live zombie-process and chat acceptance were not rerun as part
-of the compatibility update.
+avoids spawning the shell before Chromium initializes and replaces the SIGCHLD
+handler. The retirement is based on this verified signed startup source chain;
+live zombie-process and chat acceptance have not been revalidated.

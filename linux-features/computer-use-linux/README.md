@@ -68,10 +68,7 @@ backend outside the code-mode sandbox and the trusted adapter reaches it through
 NodeREPL's native-pipe bridge; the agent JavaScript kernel remains sandboxed.
 The separate `computer-use` component stores the Any App setting and exposes no
 MCP tools. Upstream owns browser control. Missing or ambiguous bundle contracts
-abort an enabled build. Main-process patches follow the current signed Rspack
-module contracts, including the anonymous native application factory. Trusted
-plugin roots remain attached to each cached connection selection and survive
-thread configuration refreshes; injected helpers resolve their own Node builtins.
+abort an enabled build.
 
 The current signed app's `nativeApplications` service supplies the native app
 picker. On Linux this feature uses the running-window backend and desktop-entry

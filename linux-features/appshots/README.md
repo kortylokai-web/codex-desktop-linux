@@ -16,9 +16,8 @@ This feature is disabled by default. Enable it before building:
 
 The feature is self-contained. It patches only the optional AppShots webview
 availability gate, Electron main-process capture service, and hotkey support.
-The capture service keeps upstream abort checks before Linux dispatch. Linux
-hotkeys default to None and reuse the upstream AppShots settings surface. It
-does not add AppShots-specific code to `computer-use-linux`, core patch modules,
+Linux hotkeys default to None and reuse the upstream AppShots settings surface.
+It does not add AppShots-specific code to `computer-use-linux`, core patch modules,
 or the default patch flow.
 
 For window metadata and AT-SPI text, the feature shells out to the bundled
