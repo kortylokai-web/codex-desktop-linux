@@ -180,7 +180,7 @@ test("malformed patched host-platform variable relationship is rejected byte-ide
   assert.equal(applyLinuxComputerUseHostPlatformPatch(source), source);
 });
 
-const nativeRegistration = "{...n.nc.computerUse,autoInstallOptOutKey:n.sc(n.nc.computerUse.name),isAvailable:({features:e,platform:t})=>(t===`darwin`||t===`win32`)&&e.computerUse}";
+const nativeRegistration = "{...n.nc.computerUse,autoInstallOptOutKey:(0,n.sc)(n.nc.computerUse.name),isAvailable:({features:e,platform:t})=>(\"darwin\"===t||\"win32\"===t)&&e.computerUse}";
 const registrationFixture = `var kd=[${nativeRegistration}];`;
 
 function evaluateNativeRegistration(source) {
@@ -212,9 +212,9 @@ test("current native registration enables Linux while preserving shared consent 
 
 test("native registration matching follows renamed aliases and preserves unrelated browser descriptors", () => {
   const browser = "{...n.nc.browser,isAvailable:({features:e})=>e.computerUse||e.externalBrowserUse}";
-  const fixture = registrationFixture.replace("var kd=[", `var kd=[${browser},`).replaceAll("n.nc", "q.registry").replaceAll("n.sc", "q.optOut").replaceAll("features:e,platform:t", "features:flags,platform:os").replaceAll("t===", "os===").replaceAll("e.computerUse", "flags.computerUse");
+  const fixture = registrationFixture.replace("var kd=[", `var kd=[${browser},`).replaceAll("n.nc", "q.registry").replaceAll("n.sc", "q.optOut").replaceAll("features:e,platform:t", "features:flags,platform:os").replaceAll("===t", "===os").replaceAll("e.computerUse", "flags.computerUse");
   const result = applyLinuxComputerUsePluginGatePatch(fixture);
-  assert.ok(result.includes("os===`linux`)&&flags.computerUse"));
+  assert.ok(result.includes("\"linux\"===os)&&flags.computerUse"));
   assert.ok(result.includes(browser.replaceAll("n.nc", "q.registry").replaceAll("e.computerUse", "flags.computerUse")));
 });
 
@@ -222,8 +222,8 @@ for (const [name, fixture] of [
   ["missing registration", "var kd=[];"],
   ["duplicate native registration", registrationFixture.replace(nativeRegistration, `${nativeRegistration},${nativeRegistration}`)],
   ["mixed patched and original registration", registrationFixture + applyLinuxComputerUsePluginGatePatch(registrationFixture)],
-  ["wrong opt-out reference", registrationFixture.replace("n.sc(n.nc.computerUse.name)", "n.sc(n.nc.browser.name)")],
-  ["unsupported gate", registrationFixture.replace("(t===`darwin`||t===`win32`)&&e.computerUse", "t===`darwin`||e.computerUse")],
+  ["wrong opt-out reference", registrationFixture.replace("(0,n.sc)(n.nc.computerUse.name)", "(0,n.sc)(n.nc.browser.name)")],
+  ["unsupported gate", registrationFixture.replace("(\"darwin\"===t||\"win32\"===t)&&e.computerUse", "t===`darwin`||e.computerUse")],
 ]) {
   test(`native plugin patch rejects ${name}`, () => {
     assert.throws(() => applyLinuxComputerUsePluginGatePatch(fixture), /Required Linux Computer Use plugin gate patch failed/);
@@ -234,7 +234,7 @@ for (const [name, fixture] of [
 test("native plugin patch rejects partial Linux registrations", () => {
   const patched = applyLinuxComputerUsePluginGatePatch(registrationFixture);
   for (const bad of [
-    patched.replace("||t===`linux`", "||t===`freebsd`"),
+    patched.replace("||\"linux\"===t", "||\"freebsd\"===t"),
     patched.replace(")&&e.computerUse", ")||e.computerUse"),
     patched.replace(".name),isAvailable", ".name),installWhenMissing:!0,isAvailable"),
   ]) {
@@ -243,9 +243,9 @@ test("native plugin patch rejects partial Linux registrations", () => {
 });
 
 test("desktop feature gate enables Linux in the unique current Windows override", () => {
-  const current = "function features(e,n,r){let i=r===`win32`&&n.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`?{...e,computerUse:!0}:e,o=i;return o}";
+  const current = "function features(e,n,r){let i=\"win32\"===r&&\"1\"===n.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE?{...e,computerUse:!0}:e,o=i;return o}";
   const patched = applyLinuxComputerUseFeaturePatch(current);
-  assert.match(patched, /r===`linux`\?\{\.\.\.e,computerUse:!0\}:r===`win32`/);
+  assert.match(patched, /"linux"===r\?\{\.\.\.e,computerUse:!0\}:"win32"===r/);
   assert.equal(applyLinuxComputerUseFeaturePatch(patched), patched);
   assert.equal(new Function("e", "n", "r", `${patched};return features(e,n,r).computerUse`)(
     { computerUse: false }, {}, "linux",
@@ -253,7 +253,7 @@ test("desktop feature gate enables Linux in the unique current Windows override"
 });
 
 test("desktop feature gate rejects missing, duplicate, and partial current contracts byte-identically", () => {
-  const current = "function features(e,n,r){let i=r===`win32`&&n.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`?{...e,computerUse:!0}:e;return i}";
+  const current = "function features(e,n,r){let i=\"win32\"===r&&\"1\"===n.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE?{...e,computerUse:!0}:e;return i}";
   const patched = applyLinuxComputerUseFeaturePatch(current);
   for (const source of [
     current + current,
@@ -278,7 +278,7 @@ test("anchor-free desktop feature gate reports enabled-feature drift", () => {
 
   assert.equal(result.patchedSource, source);
   assert.equal(result.warnings.length, 1);
-  assert.match(result.warnings[0], /Could not find Computer Use desktop feature gate/);
+  assert.match(result.warnings[0], /Could not find unique current Computer Use desktop feature gate/);
   assert.equal(report.patches[0].status, "skipped-optional");
   assert.notEqual(report.patches[0].status, "already-applied");
   assert.equal(enabledFeatureFailuresFromReport(report).length, 1);

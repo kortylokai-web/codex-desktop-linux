@@ -48,45 +48,41 @@ function linuxAppshotWaylandHelperSource() {
 }
 
 function appshotHotkeyPatterns(source) {
-  const currentRegistrations = [...source.matchAll(
-    /function [A-Za-z_$][\w$]*\(([A-Za-z_$][\w$]*),[A-Za-z_$][\w$]*,[A-Za-z_$][\w$]*=`press`\)\{if\(process\.platform!==`darwin`(?:&&process\.platform!==`linux`)?\)return null;let [A-Za-z_$][\w$]*=([A-Za-z_$][\w$]*)\(\1\)\?\?[A-Za-z_$][\w$]*\(\1\);/gu,
-  )];
-  const registrationOwners = [...source.matchAll(
-    /function [A-Za-z_$][\w$]*\(([A-Za-z_$][\w$]*),[A-Za-z_$][\w$]*,[A-Za-z_$][\w$]*=`press`\)\{if\(process\.platform!==`darwin`(?:&&process\.platform!==`linux`)?\)return null;let [A-Za-z_$][\w$]*=([A-Za-z_$][\w$]*)\(\1\)(?:\?\?[A-Za-z_$][\w$]*\(\1\))?;/gu,
-  )];
-  const registration = currentRegistrations.length === 1 && registrationOwners.length === 1
-    ? currentRegistrations[0]
-    : null;
-  const normalize = registration?.[2];
-  const normalizeCall = normalize == null ? "(?!)" : normalize.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Rspack inlines the native registration function; bind eligibility to its normalizer.
+  const registrationPrefix = `function\\((${IDENT}),(${IDENT}),(${IDENT})="press"\\)\\{(var ${IDENT}(?:,${IDENT})*;let ${IDENT}(?:,${IDENT})*;)`;
+  const registrations = [...source.matchAll(new RegExp(
+    registrationPrefix + `if\\("darwin"!==process\\.platform(?:&&"linux"!==process\\.platform)?\\)return null;let ${IDENT}=(${IDENT})\\(\\1\\)(?:\\?\\?${IDENT}\\(\\1\\))?;`, "g",
+  ))];
+  const normalize = registrations.length === 1
+    ? registrations[0][5].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    : "(?!)";
   return [
     {
-      current: new RegExp(`function ([A-Za-z_$][\\w$]*)\\(([A-Za-z_$][\\w$]*),([A-Za-z_$][\\w$]*)=process\\.platform\\)\\{return \\3===\`darwin\`&&(${normalizeCall})\\(\\2\\)!=null\\}`, "g"),
-      patched: new RegExp(`function ([A-Za-z_$][\\w$]*)\\(([A-Za-z_$][\\w$]*),([A-Za-z_$][\\w$]*)=process\\.platform\\)\\{return \\(\\3===\`darwin\`\\|\\|\\3===\`linux\`&&!codexLinuxAppshotIsWayland\\(\\)\\)&&(${normalizeCall})\\(\\2\\)!=null\\}`, "g"),
+      current: new RegExp(`function (${IDENT})\\((${IDENT}),(${IDENT})=process\\.platform\\)\\{return"darwin"===\\3&&null!=(${normalize})\\(\\2\\)\\}`, "g"),
+      patched: new RegExp(`function (${IDENT})\\((${IDENT}),(${IDENT})=process\\.platform\\)\\{return\\("darwin"===\\3\\|\\|"linux"===\\3&&!codexLinuxAppshotIsWayland\\(\\)\\)&&null!=(${normalize})\\(\\2\\)\\}`, "g"),
       replace: (_match, fn, hotkey, platform, normalize) =>
-        `function ${fn}(${hotkey},${platform}=process.platform){return (${platform}===\`darwin\`||${platform}===\`linux\`&&!codexLinuxAppshotIsWayland())&&${normalize}(${hotkey})!=null}`,
+        `function ${fn}(${hotkey},${platform}=process.platform){return("darwin"===${platform}||"linux"===${platform}&&!codexLinuxAppshotIsWayland())&&null!=${normalize}(${hotkey})}`,
     },
     {
-      current: /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)=`press`\)\{if\(process\.platform!==`darwin`\)return null;/g,
-      patched: /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)=`press`\)\{if\(process\.platform!==`darwin`&&process\.platform!==`linux`\)return null;/g,
-      replace: (_match, fn, hotkey, handlers, trigger) =>
-        `function ${fn}(${hotkey},${handlers},${trigger}=\`press\`){if(process.platform!==\`darwin\`&&process.platform!==\`linux\`)return null;`,
+      current: new RegExp(registrationPrefix + `if\\("darwin"!==process\\.platform\\)return null;let (${IDENT})=(${IDENT})\\(\\1\\)\\?\\?(${IDENT})\\(\\1\\);`, "g"),
+      patched: new RegExp(registrationPrefix + `if\\("darwin"!==process\\.platform&&"linux"!==process\\.platform\\)return null;let (${IDENT})=(${IDENT})\\(\\1\\)\\?\\?(${IDENT})\\(\\1\\);`, "g"),
+      replace: (_match, hotkey, handlers, trigger, declarations, value, normalize, fallback) =>
+        `function(${hotkey},${handlers},${trigger}="press"){${declarations}if("darwin"!==process.platform&&"linux"!==process.platform)return null;let ${value}=${normalize}(${hotkey})??${fallback}(${hotkey});`,
     },
     {
-      current: /new Set\(\[\.\.\.([A-Za-z_$][\w$]*),`shift`\]\)/g,
-      patched: /new Set\(\[\.\.\.([A-Za-z_$][\w$]*),`shift`,`super`,`meta`,`win`\]\)/g,
-      replace: (_match, base) => `new Set([...${base},\`shift\`,\`super\`,\`meta\`,\`win\`])`,
+      current: /new Set\(\[\.\.\.([A-Za-z_$][\w$]*),"shift"\]\)/g,
+      patched: /new Set\(\[\.\.\.([A-Za-z_$][\w$]*),"shift","super","meta","win"\]\)/g,
+      replace: (_match, base) => `new Set([...${base},"shift","super","meta","win"])`,
     },
     {
-      current: /this\.configuredHotkey=([A-Za-z_$][\w$]*)===void 0\?process\.platform===`win32`\?([A-Za-z_$][\w$]*):([A-Za-z_$][\w$]*):\1/g,
-      patched: /this\.configuredHotkey=([A-Za-z_$][\w$]*)===void 0\?process\.platform===`win32`\?([A-Za-z_$][\w$]*):process\.platform===`linux`\?null:([A-Za-z_$][\w$]*):\1/g,
-      replace: (_match, stored, windowsDefault, macDefault) =>
-        `this.configuredHotkey=${stored}===void 0?process.platform===\`win32\`?${windowsDefault}:process.platform===\`linux\`?null:${macDefault}:${stored}`,
+      current: /void 0===([A-Za-z_$][\w$]*)\?this\.configuredHotkey="win32"===process\.platform\?"DoubleAlt":"DoubleCommand":this\.configuredHotkey=\1/g,
+      patched: /void 0===([A-Za-z_$][\w$]*)\?this\.configuredHotkey="win32"===process\.platform\?"DoubleAlt":"linux"===process\.platform\?null:"DoubleCommand":this\.configuredHotkey=\1/g,
+      replace: (_match, stored) => `void 0===${stored}?this.configuredHotkey="win32"===process.platform?"DoubleAlt":"linux"===process.platform?null:"DoubleCommand":this.configuredHotkey=${stored}`,
     },
     {
-      current: /supported:this\.enabled&&\(process\.platform===`darwin`\|\|process\.platform===`win32`&&this\.windowsCaptureNativeBridge!=null&&!this\.windowsCaptureNativeBridgeFailed\),configuredHotkey:this\.configuredHotkey,isActive:this\.registration!=null/g,
-      patched: /supported:this\.enabled&&\(process\.platform===`linux`\|\|process\.platform===`darwin`\|\|process\.platform===`win32`&&this\.windowsCaptureNativeBridge!=null&&!this\.windowsCaptureNativeBridgeFailed\),configuredHotkey:this\.configuredHotkey,isActive:this\.registration!=null,linuxWayland:codexLinuxAppshotIsWayland\(\)/g,
-      replace: "supported:this.enabled&&(process.platform===`linux`||process.platform===`darwin`||process.platform===`win32`&&this.windowsCaptureNativeBridge!=null&&!this.windowsCaptureNativeBridgeFailed),configuredHotkey:this.configuredHotkey,isActive:this.registration!=null,linuxWayland:codexLinuxAppshotIsWayland()",
+      current: /supported:this\.enabled&&\("darwin"===process\.platform\|\|"win32"===process\.platform&&null!=this\.windowsCaptureNativeBridge&&!this\.windowsCaptureNativeBridgeFailed\),configuredHotkey:this\.configuredHotkey,isActive:null!=this\.registration/g,
+      patched: /supported:this\.enabled&&\("linux"===process\.platform\|\|"darwin"===process\.platform\|\|"win32"===process\.platform&&null!=this\.windowsCaptureNativeBridge&&!this\.windowsCaptureNativeBridgeFailed\),configuredHotkey:this\.configuredHotkey,isActive:null!=this\.registration,linuxWayland:codexLinuxAppshotIsWayland\(\)/g,
+      replace: 'supported:this.enabled&&("linux"===process.platform||"darwin"===process.platform||"win32"===process.platform&&null!=this.windowsCaptureNativeBridge&&!this.windowsCaptureNativeBridgeFailed),configuredHotkey:this.configuredHotkey,isActive:null!=this.registration,linuxWayland:codexLinuxAppshotIsWayland()',
     },
   ];
 }
@@ -129,37 +125,36 @@ function applyLinuxAppshotHotkeyPatch(source) {
   return appshotHotkeyState(patched).kind === "patched" ? patched : source;
 }
 
-function applyLinuxAppshotMainProcessPatch(currentSource) {
-  if (currentSource.includes(APPSHOT_HELPER_MARKER)) {
-    return currentSource;
-  }
+function appshotCapturePatterns() {
+  return [
+    {
+      current: /async getFrontmostWindow\(\)\{return this\.abortController\.signal\.aborted\?null:(?="win32"===process\.platform)/g,
+      patched: /async getFrontmostWindow\(\)\{return this\.abortController\.signal\.aborted\?null:"linux"===process\.platform\?codexLinuxAppshotFrontmostWindow\(\):(?="win32"===process\.platform)/g,
+      replace: 'async getFrontmostWindow(){return this.abortController.signal.aborted?null:"linux"===process.platform?codexLinuxAppshotFrontmostWindow():',
+    },
+    {
+      current: new RegExp(`(async start\\(\\{animationDestination:(${IDENT}),animationPresentationStyle:(${IDENT}),bundleIdentifier:(${IDENT}),requestId:(${IDENT})\\}\\)\\{let\\{origin:(${IDENT}),settings:${IDENT},windowManager:(${IDENT}),requestComputerUseCaptureWorker:${IDENT},subscribeComputerUseCaptureWorkerEvent:${IDENT},windowsCaptureNativeBridge:${IDENT}\\}=this\\.options;if\\(this\\.abortController\\.signal\\.aborted\\)return null;)(?!if\\("linux")`, "g"),
+      patched: new RegExp(`async start\\(\\{animationDestination:(${IDENT}),animationPresentationStyle:(${IDENT}),bundleIdentifier:(${IDENT}),requestId:(${IDENT})\\}\\)\\{let\\{origin:(${IDENT}),settings:${IDENT},windowManager:(${IDENT}),requestComputerUseCaptureWorker:${IDENT},subscribeComputerUseCaptureWorkerEvent:${IDENT},windowsCaptureNativeBridge:${IDENT}\\}=this\\.options;if\\(this\\.abortController\\.signal\\.aborted\\)return null;if\\("linux"===process\\.platform\\)return codexLinuxAppshotStartCapture\\(\\{origin:\\5,requestId:\\4,bundleIdentifier:\\3,windowManager:\\6\\}\\);`, "g"),
+      replace: (_match, prefix, _destination, _style, bundle, request, origin, manager) => `${prefix}if("linux"===process.platform)return codexLinuxAppshotStartCapture({origin:${origin},requestId:${request},bundleIdentifier:${bundle},windowManager:${manager}});`,
+    },
+  ];
+}
 
-  if (!currentSource.includes(".sendInlineMessageForView(")) {
-    warn("Could not find inline renderer message sender", "Linux AppShots main-process patch");
-    return currentSource;
+function applyLinuxAppshotMainProcessPatch(source) {
+  const patterns = appshotCapturePatterns();
+  const counts = (key) => patterns.map((pattern) => [...source.matchAll(pattern[key])].length);
+  const current = counts("current"), patched = counts("patched");
+  const markerCount = source.split(`function ${APPSHOT_HELPER_MARKER}(`).length - 1;
+  if (current.every(count => count === 0) && patched.every(count => count === 1) && markerCount === 1) return source;
+  if (!source.includes(".sendInlineMessageForView(") ||
+      !current.every(count => count === 1) || !patched.every(count => count === 0) ||
+      source.includes(APPSHOT_HELPER_MARKER)) {
+    warn("Could not find one complete current AppShots capture owner", "Linux AppShots main-process patch");
+    return source;
   }
-
-  const frontmostPattern = /("computer-use-frontmost-window":async\(\{origin:[A-Za-z_$][\w$]*,signal:[A-Za-z_$][\w$]*\}\)=>)(?=process\.platform===`win32`)/g;
-  const capturePattern = /("computer-use-start-capture":async\(\{animationDestination:([A-Za-z_$][\w$]*),animationPresentationStyle:[A-Za-z_$][\w$]*,bundleIdentifier:([A-Za-z_$][\w$]*),origin:([A-Za-z_$][\w$]*),requestId:([A-Za-z_$][\w$]*),signal:[A-Za-z_$][\w$]*\}\)=>\{)if\(process\.platform!==`darwin`&&process\.platform!==`win32`\)return null;/g;
-  const frontmostMatches = [...currentSource.matchAll(frontmostPattern)];
-  const captureMatches = [...currentSource.matchAll(capturePattern)];
-  if (frontmostMatches.length !== 1 || captureMatches.length !== 1) {
-    if (currentSource.includes("computer-use-frontmost-window") || currentSource.includes("computer-use-start-capture")) {
-      warn("Could not find AppShots main-process handlers", "Linux AppShots main-process patch");
-    }
-    return currentSource;
-  }
-  let patchedSource = currentSource.replace(
-    frontmostPattern,
-    "$1process.platform===`linux`?codexLinuxAppshotFrontmostWindow():",
-  );
-  patchedSource = patchedSource.replace(
-    capturePattern,
-    (_match, prefix, _animationDestinationVar, bundleIdentifierVar, originVar, requestIdVar) =>
-      `${prefix}if(process.platform===\`linux\`)return codexLinuxAppshotStartCapture({origin:${originVar},requestId:${requestIdVar},bundleIdentifier:${bundleIdentifierVar},windowManager:this.windowManager});if(process.platform!==\`darwin\`&&process.platform!==\`win32\`)return null;`,
-  );
-
-  return appendLinuxAppshotHelper(patchedSource);
+  let result = source;
+  for (const { current, replace } of patterns) result = result.replace(current, replace);
+  return appendLinuxAppshotHelper(result);
 }
 
 function appendLinuxAppshotHelper(source) {

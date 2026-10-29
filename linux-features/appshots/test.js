@@ -46,26 +46,23 @@ function appshotAvailabilityAtomBundleFixture() {
 
 function appshotMainProcessBundleFixture() {
   return [
-    "var FO=new Map;",
-    "function HO(e,t){let n=FO.get(e);n!=null&&(n.windowManager.sendInlineMessageForView(n.origin,{requestId:e,type:`computer-use-capture-updated`,update:t}),done(e,n))}",
-    "\"computer-use-frontmost-window\":async({origin:e,signal:t})=>process.platform===`win32`?bridge(e,t):process.platform===`darwin`?Xo():null,",
-    "\"computer-use-start-capture\":async({animationDestination:e,animationPresentationStyle:s,bundleIdentifier:t,origin:n,requestId:r,signal:i})=>{if(process.platform!==`darwin`&&process.platform!==`win32`)return null;let a=GO({backgroundColor:e.backgroundColor,webContents:n});return a}",
+    'function send(e,t,r){e.sendInlineMessageForView(t,{requestId:r,type:"computer-use-capture-updated"})}',
+    'class Capture{options;abortController=new AbortController;constructor(e){this.options=e}',
+    'async getFrontmostWindow(){return this.abortController.signal.aborted?null:"win32"===process.platform?flags().appshotsEnabled?this.options.windowsCaptureNativeBridge?.getFrontmostWindow(this.options.origin,this.abortController.signal)??null:null:macFrontmost()}',
+    'async start({animationDestination:e,animationPresentationStyle:t,bundleIdentifier:r,requestId:n}){let{origin:i,settings:s,windowManager:a,requestComputerUseCaptureWorker:o,subscribeComputerUseCaptureWorkerEvent:l,windowsCaptureNativeBridge:c}=this.options;if(this.abortController.signal.aborted)return null;let d=animation(e,t);return null==d?null:capture(d,r,i,n)}}',
+    'globalThis.Capture=Capture;',
   ].join("");
 }
 
 function currentAppshotHotkeyMainBundleFixture() {
   return [
-    "var R8=`DoubleCommand`,T8=`DoubleAlt`;",
-    "var Yk=new Set([`cmdorctrl`,`command`,`cmd`,`control`,`ctrl`,`alt`,`option`]),Jk=new Set([...Yk,`shift`]);",
-    "function zk(e){return e}",
-    "function Qk(){return null}",
-    "function Nk(e,t,n){globalThis.registered={hotkey:e,handlers:t,trigger:n};return{unregister(){}}}",
-    "function Lk(e,t=process.platform){return t===`darwin`&&zk(e)!=null}",
-    "function Mk(e,t,n=`press`){if(process.platform!==`darwin`)return null;let r=zk(e)??Qk(e);return r==null?null:Nk(r,t,n)}",
-    "var B8=class{configuredHotkey;registration=null;windowsCaptureNativeBridgeFailed=!1;constructor(e){this.enabled=!0,this.windowsCaptureNativeBridge=null;let a=e.getStored(`appshotHotkey`);this.configuredHotkey=a===void 0?process.platform===`win32`?T8:R8:a;this.sync()}getState(){return{supported:this.enabled&&(process.platform===`darwin`||process.platform===`win32`&&this.windowsCaptureNativeBridge!=null&&!this.windowsCaptureNativeBridgeFailed),configuredHotkey:this.configuredHotkey,isActive:this.registration!=null}}sync(){if(!this.getState().supported||this.configuredHotkey==null)return;this.registration=Mk(this.configuredHotkey,{onPressed(){}})}};",
-    "globalThis.hotkeyEligible=Lk;globalThis.modifiers=Jk;",
-    "globalThis.AppshotHotkeys=B8;",
-    "globalThis.appshotHotkeyState=`appshot-hotkey-state`;",
+    'var Yk=new Set(["cmdorctrl","command","cmd","control","ctrl","alt","option","super"]),Jk=new Set([...Yk,"shift"]);',
+    'function zk(e){return e}function Qk(){return null}',
+    'function Nk(e,t,n){globalThis.registered={hotkey:e,handlers:t,trigger:n};return{unregister(){}}}',
+    'function Lk(e,t=process.platform){return"darwin"===t&&null!=zk(e)}',
+    'var Mk=function(e,t,n="press"){var a,b;let c,d;if("darwin"!==process.platform)return null;let r=zk(e)??Qk(e);return r==null?null:Nk(r,t,n)};',
+    'var B8=class{configuredHotkey;registration=null;windowsCaptureNativeBridgeFailed=!1;constructor(e){this.enabled=!0,this.windowsCaptureNativeBridge=null;let a=e.getStored("appshotHotkey");void 0===a?this.configuredHotkey="win32"===process.platform?"DoubleAlt":"DoubleCommand":this.configuredHotkey=a;this.sync()}getState(){return{supported:this.enabled&&("darwin"===process.platform||"win32"===process.platform&&null!=this.windowsCaptureNativeBridge&&!this.windowsCaptureNativeBridgeFailed),configuredHotkey:this.configuredHotkey,isActive:null!=this.registration}}sync(){if(!this.getState().supported||this.configuredHotkey==null)return;this.registration=Mk(this.configuredHotkey,{onPressed(){}})}};',
+    'globalThis.hotkeyEligible=Lk;globalThis.modifiers=Jk;globalThis.AppshotHotkeys=B8;globalThis.appshotHotkeyState="appshot-hotkey-state";',
   ].join("");
 }
 
@@ -336,11 +333,11 @@ test("routes AppShots capture through the self-contained Linux feature", () => {
 
   assert.match(
     patched,
-    /process\.platform===`linux`\?codexLinuxAppshotFrontmostWindow\(\):process\.platform===`win32`/,
+    /"linux"===process\.platform\?codexLinuxAppshotFrontmostWindow\(\):"win32"===process\.platform/,
   );
   assert.match(
     patched,
-    /if\(process\.platform===`linux`\)return codexLinuxAppshotStartCapture\(\{origin:n,requestId:r,bundleIdentifier:t,windowManager:this\.windowManager\}\);/,
+    /if\("linux"===process\.platform\)return codexLinuxAppshotStartCapture\(\{origin:i,requestId:n,bundleIdentifier:r,windowManager:a\}\);/,
   );
   assert.match(patched, /function codexLinuxAppshotBackendPath/);
   assert.match(patched, /codexLinuxAppshotBackendJson\(\[`windows`\],5000\)/);
@@ -397,6 +394,40 @@ test("routes AppShots capture through the self-contained Linux feature", () => {
   assert.match(patched, /type:`axText`,text:l/);
   assert.match(patched, /type:`screenshot`,screenshotDataURL:u\.dataURL/);
   assert.match(patched, /type:`completed`,transitionSnapshotDataURL:u\.dataURL/);
+});
+
+test("AppShots preserves the capture service abort guard before Linux dispatch", async () => {
+  const context = vm.createContext({ AbortController, process: { platform: "linux" } });
+  vm.runInContext(applyLinuxAppshotMainProcessPatch(appshotMainProcessBundleFixture()), context);
+  const calls = [];
+  context.codexLinuxAppshotFrontmostWindow = () => { calls.push("frontmost"); return "external"; };
+  context.codexLinuxAppshotStartCapture = (request) => { calls.push(request); return "capture"; };
+  const options = { origin: {}, windowManager: {} };
+  const service = new context.Capture(options);
+  assert.equal(await service.getFrontmostWindow(), "external");
+  assert.equal(await service.start({ bundleIdentifier: "window", requestId: "request" }), "capture");
+  assert.equal(calls[1].origin, options.origin);
+  assert.equal(calls[1].windowManager, options.windowManager);
+  assert.equal(calls[1].requestId, "request");
+  assert.equal(calls[1].bundleIdentifier, "window");
+  service.abortController.abort();
+  assert.equal(await service.getFrontmostWindow(), null);
+  assert.equal(await service.start({}), null);
+  assert.equal(calls.length, 2);
+});
+
+test("AppShots capture patch leaves partial and ambiguous owners unchanged", () => {
+  const source = appshotMainProcessBundleFixture();
+  const patched = applyLinuxAppshotMainProcessPatch(source);
+  for (const invalid of [
+    source + source,
+    patched + patched,
+    source + patched,
+    source.replace("getFrontmostWindow(){", "renamed(){"),
+    patched.replace('"linux"===process.platform?codexLinuxAppshotFrontmostWindow():', ""),
+  ]) {
+    captureWarnings(() => assert.equal(applyLinuxAppshotMainProcessPatch(invalid), invalid));
+  }
 });
 
 test("AppShots maps an explicit Hyprland picker selection and keeps X11 stacking fallback", () => {
@@ -1382,10 +1413,10 @@ test("current AppShots hotkey owner supports Linux and registers a saved bare-mo
 
   assert.equal(matchesLinuxAppshotHotkeyContract(pristine), true);
   assert.equal(matchesLinuxAppshotHotkeyContract(patched), true);
-  assert.match(patched, /process\.platform===`linux`\|\|process\.platform===`darwin`/);
-  assert.match(patched, /process\.platform!==`darwin`&&process\.platform!==`linux`/);
-  assert.match(patched, /`shift`,`super`,`meta`,`win`/);
-  assert.match(patched, /process\.platform===`linux`\?null:R8/);
+  assert.match(patched, /"linux"===process\.platform\|\|"darwin"===process\.platform/);
+  assert.match(patched, /"darwin"!==process\.platform&&"linux"!==process\.platform/);
+  assert.match(patched, /"shift","super","meta","win"/);
+  assert.match(patched, /"linux"===process\.platform\?null:"DoubleCommand"/);
 
   const context = vm.createContext({
     process: { env: { XDG_SESSION_TYPE: "x11" }, platform: "linux" },
@@ -1402,7 +1433,7 @@ test("current AppShots hotkey owner supports Linux and registers a saved bare-mo
   assert.equal(savedShortcut.getState().isActive, true);
   assert.equal(context.registered.hotkey, "DoubleAlt");
   assert.equal(context.hotkeyEligible("DoubleAlt"), true);
-  assert.deepEqual(Array.from(context.modifiers).slice(-4), ["shift", "super", "meta", "win"]);
+  assert.ok(["shift", "super", "meta", "win"].every((modifier) => context.modifiers.has(modifier)));
 });
 
 test("AppShots hotkey Linux eligibility remains disabled for Wayland bare modifiers", () => {
@@ -1419,12 +1450,12 @@ test("AppShots hotkey patch fails closed for missing, partial, duplicate, and am
   const pristine = currentAppshotHotkeyMainBundleFixture();
   const patched = applyLinuxAppshotHotkeyPatch(pristine);
   const partial = patched.replace(
-    "process.platform===`linux`||process.platform===`darwin`",
-    "process.platform===`darwin`",
+    '"linux"===process.platform||"darwin"===process.platform',
+    '"darwin"===process.platform',
   );
   const missing = "globalThis.appshotHotkeyState=`appshot-hotkey-state`";
-  const retired = pristine.replace("let r=zk(e)??Qk(e)", "let r=zk(e)");
-  const mixedContracts = `${pristine}function retired(e,t,n=\`press\`){if(process.platform!==\`darwin\`)return null;let r=zk(e);}`;
+  const retired = pristine.replace('let r=zk(e)??Qk(e)', 'let r=zk(e)');
+  const mixedContracts = `${pristine}function(e,t,n="press"){var a,b;let c,d;if("darwin"!==process.platform)return null;let r=zk(e);}`;
   for (const source of [
     missing,
     retired,

@@ -17,17 +17,15 @@ const {
 // This shape comes from the signed official Linux main bundle. Keep the
 // fixture independent of patch.js so upstream confirmation drift is visible.
 const OFFICIAL_BUNDLE =
-  "function qrt({isWindows:e,quitState:r,windows:i}){" +
-  "let S=!1;l.app.on(`before-quit`,o=>{if(e||r.canQuitWithoutPrompt()){S=!0,i.markAppQuitting();return}" +
-  "if(l.dialog.showMessageBoxSync({message:`Quit?`,buttons:[{messageId:`desktop.quitConfirmation.quit`},`Cancel`]})!==0){o.preventDefault();return}" +
-  "r.markQuitApproved(),S=!0,i.markAppQuitting()})," +
-  "l.app.on(`will-quit`,t=>{Promise.allSettled([flush(),save()]).then(()=>l.app.quit())})}" +
-  "function next(){}";
-const OFFICIAL_SHELL =
-  "async function load(a,b){let started=Date.now();electron.app.isPackaged||clean();" +
-  "let abort=new AbortController;logger(`Failed to load shell env`,{resultSource:`load`})}";
+  'const register=function({isWindows:e,disableQuitConfirmationPrompt:t,quitState:r,windows:n}){' +
+  'let y=!1,v=!1;ea.app.on("before-quit",i=>{' +
+  'if(e||r.canQuitWithoutPrompt()||t){v=!0,n.markAppQuitting();return}' +
+  'let u="Quit?";0!==ea.dialog.showMessageBoxSync({message:u,buttons:[{messageId:"desktop.quitConfirmation.quit"},"Cancel"]})' +
+  '?i.preventDefault():(r.markQuitApproved(),v=!0,n.markAppQuitting())}),' +
+  'ea.app.on("will-quit",t=>{Promise.allSettled([flush(),save()]).then(()=>ea.app.quit())})};' +
+  'function next(){}';
 
-test("one required descriptor owns both portable core repairs", () => {
+test("one required descriptor owns the portable Quit repair", () => {
   assert.equal(descriptors.length, 1);
   assert.equal(descriptors[0].id, "quit-confirmation-focus");
   assert.equal(descriptors[0].phase, "extracted-app:pre-webview");
@@ -35,44 +33,27 @@ test("one required descriptor owns both portable core repairs", () => {
   assert.equal(Object.hasOwn(descriptors[0], "appliesTo"), false);
 });
 
-test("required core descriptor validates every contract before writing", (t) => {
+test("required core descriptor discovers renamed modules without touching shell startup", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "required-core-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const buildDir = path.join(root, ".vite", "build");
   fs.mkdirSync(buildDir, { recursive: true });
-  const main = path.join(buildDir, "main-fixture.js");
+  const main = path.join(buildDir, "early-bootstrap-renamed.cjs");
   const shell = path.join(buildDir, "shell-fixture.js");
+  const shellSource = 'async function upstreamShell(){await app.whenReady();return loadShell()}';
   fs.writeFileSync(main, OFFICIAL_BUNDLE);
-  fs.writeFileSync(shell, OFFICIAL_SHELL.replace("Date.now()", "performance.now()"));
-
-  assert.throws(() => patchRequiredCoreBlockers(root), /shell environment startup function/);
-  assert.equal(fs.readFileSync(main, "utf8"), OFFICIAL_BUNDLE);
-  fs.writeFileSync(shell, OFFICIAL_SHELL);
+  fs.writeFileSync(shell, shellSource);
   assert.deepEqual(patchRequiredCoreBlockers(root), { changed: true });
   assert.match(fs.readFileSync(main, "utf8"), /codexLinuxQuitDialogParent/);
-  assert.match(fs.readFileSync(shell, "utf8"), /await new Promise\(setImmediate\)/);
+  assert.equal(fs.readFileSync(shell, "utf8"), shellSource);
   assert.deepEqual(patchRequiredCoreBlockers(root), { changed: false });
 
-  const duplicate = path.join(buildDir, "other-name.js");
+  const duplicate = path.join(buildDir, "other-name.mjs");
+  fs.writeFileSync(main, OFFICIAL_BUNDLE);
   fs.copyFileSync(main, duplicate);
-  const shellBefore = fs.readFileSync(shell);
   assert.throws(() => patchRequiredCoreBlockers(root), /exactly one official main-process Quit module/);
-  assert.deepEqual(fs.readFileSync(shell), shellBefore);
-});
-
-test("required core descriptor composes both repairs in a consolidated module", (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "required-core-consolidated-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const buildDir = path.join(root, ".vite", "build");
-  fs.mkdirSync(buildDir, { recursive: true });
-  const combined = path.join(buildDir, "main-with-shell.js");
-  fs.writeFileSync(combined, `${OFFICIAL_BUNDLE}\n${OFFICIAL_SHELL}`);
-
-  assert.deepEqual(patchRequiredCoreBlockers(root), { changed: true });
-  const patched = fs.readFileSync(combined, "utf8");
-  assert.match(patched, /codexLinuxQuitDialogParent/);
-  assert.match(patched, /await new Promise\(setImmediate\)/);
-  assert.deepEqual(patchRequiredCoreBlockers(root), { changed: false });
+  assert.equal(fs.readFileSync(main, "utf8"), OFFICIAL_BUNDLE);
+  assert.equal(fs.readFileSync(shell, "utf8"), shellSource);
 });
 
 function window(id, { destroyed = false, visible = true } = {}) {
@@ -83,7 +64,7 @@ function window(id, { destroyed = false, visible = true } = {}) {
   };
 }
 
-function harness({ focused = window(7), primary = window(3), others = [] } = {}) {
+function harness({ focused = window(7), primary = window(3), others = [], dialogFailure = null } = {}) {
   const handlers = new Map();
   const dialogCalls = [];
   const errors = [];
@@ -110,7 +91,7 @@ function harness({ focused = window(7), primary = window(3), others = [] } = {})
         },
       };
     },
-    l: {
+    ea: {
       app: {
         on: (name, callback) => handlers.set(name, [...handlers.get(name) ?? [], callback]),
         quit: () => {
@@ -124,13 +105,14 @@ function harness({ focused = window(7), primary = window(3), others = [] } = {})
         },
         showMessageBox: (...args) => {
           dialogCalls.push(args);
+          if (dialogFailure) return Promise.reject(dialogFailure);
           return new Promise((resolve) => { resolveDialog = resolve; });
         },
       },
     },
   };
   const register = vm.runInNewContext(
-    `${applyQuitConfirmationFocus(OFFICIAL_BUNDLE)};qrt`,
+    `${applyQuitConfirmationFocus(OFFICIAL_BUNDLE)};register`,
     context,
   );
   register({
@@ -159,7 +141,7 @@ const tick = () => new Promise(setImmediate);
 
 test("patches only the official confirmation and is idempotent", () => {
   const patched = applyQuitConfirmationFocus(OFFICIAL_BUNDLE);
-  assert.match(patched, /codexLinuxQuitDialogParent\(i\)/);
+  assert.match(patched, /codexLinuxQuitDialogParent\(n\)/);
   assert.match(patched, /dialog\.showMessageBox\(codexLinuxParent,codexLinuxOptions\)/);
   assert.doesNotMatch(patched, /showMessageBoxSync\(/);
   assert.match(patched, /Promise\.allSettled\(\[flush\(\),save\(\)\]\)/);
@@ -239,61 +221,56 @@ test("falls back to another visible live window", async () => {
   assert.equal(app.accepted, 0);
 });
 
-test("applies both required repairs to uniquely anchored signed campaign modules", {
+test("uses an unparented asynchronous dialog when no live visible window exists", async () => {
+  const app = harness({ focused: null, primary: null });
+  app.emitBeforeQuit();
+  await tick();
+  assert.equal(app.dialogCalls[0].length, 1);
+  assert.equal(app.dialogCalls[0][0].message, "Quit?");
+  app.answer(1);
+  await tick();
+  assert.equal(app.accepted, 0);
+});
+
+test("dialog failures keep the app open and allow another Quit attempt", async () => {
+  const app = harness({ dialogFailure: new Error("dialog unavailable") });
+  app.emitBeforeQuit();
+  await tick();
+  assert.equal(app.errors.length, 1);
+  assert.equal(app.accepted, 0);
+  assert.equal(app.quitCalls, 0);
+  app.emitBeforeQuit();
+  await tick();
+  assert.equal(app.dialogCalls.length, 2);
+});
+
+test("rejects a partial patch instead of treating it as already applied", () => {
+  const patched = applyQuitConfirmationFocus(OFFICIAL_BUNDLE);
+  assert.throws(() => applyQuitConfirmationFocus(
+    patched.replace("if(codexLinuxQuitPromptPending)", "if(false)")), /Incomplete Quit confirmation focus patch/);
+});
+
+test("applies the required Quit repair to the uniquely anchored signed module", {
   skip: process.env.CODEX_SIGNED_EXTRACTED_APP == null,
 }, (t) => {
-  const buildDir = path.join(process.env.CODEX_SIGNED_EXTRACTED_APP, ".vite", "build");
-  const modules = fs.readdirSync(buildDir)
-    .filter((name) => name.endsWith(".js"))
-    .sort()
-    .map((name) => ({
-      name,
-      source: fs.readFileSync(path.join(buildDir, name), "utf8"),
-    }));
-  const candidates = modules.filter(({ source }) =>
-    source.includes("messageId:`desktop.quitConfirmation.quit`"));
-  const shellCandidates = modules.filter(({ source }) =>
-    source.includes("`Failed to load shell env`") &&
-      source.includes("resultSource:`load`") &&
-      source.includes("new AbortController"));
-  assert.equal(
-    candidates.length,
-    1,
-    `expected one signed main-process Quit anchor, found: ${candidates.map(({ name }) => name).join(", ")}`,
-  );
-  assert.equal(
-    shellCandidates.length,
-    1,
-    `expected one signed shell environment anchor, found: ${shellCandidates.map(({ name }) => name).join(", ")}`,
-  );
-
+  const { readMainProcessModules } = require("../../lib/assets.js");
+  const candidates = readMainProcessModules(process.env.CODEX_SIGNED_EXTRACTED_APP)
+    .filter(({ source }) => source.includes("desktop.quitConfirmation.quit"));
+  assert.equal(candidates.length, 1,
+    `expected one signed Quit anchor, found: ${candidates.map(({ name }) => name).join(", ")}`);
   const source = candidates[0].source;
   const patched = applyQuitConfirmationFocus(source);
   assert.notEqual(patched, source);
   assert.match(patched, /function codexLinuxQuitDialogParent\(/);
   assert.match(patched, /codexLinuxQuitPromptPending=!0/);
-  assert.doesNotMatch(
-    patched.slice(
-      patched.lastIndexOf("function ", patched.indexOf("desktop.quitConfirmation.quit")),
-      patched.indexOf("}function ", patched.indexOf("desktop.quitConfirmation.quit")) + 1,
-    ),
-    /showMessageBoxSync\(/,
-  );
   assert.equal(applyQuitConfirmationFocus(patched), patched);
+  new vm.Script(patched);
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "signed-required-core-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const fixtureBuild = path.join(root, ".vite", "build");
   fs.mkdirSync(fixtureBuild, { recursive: true });
   fs.writeFileSync(path.join(fixtureBuild, "renamed-main.js"), source);
-  fs.writeFileSync(path.join(fixtureBuild, "renamed-shell.js"), shellCandidates[0].source);
   assert.deepEqual(patchRequiredCoreBlockers(root), { changed: true });
-  assert.match(
-    fs.readFileSync(path.join(fixtureBuild, "renamed-main.js"), "utf8"),
-    /function codexLinuxQuitDialogParent\(/,
-  );
-  assert.match(
-    fs.readFileSync(path.join(fixtureBuild, "renamed-shell.js"), "utf8"),
-    /await new Promise\(setImmediate\)/,
-  );
+  assert.equal(fs.readFileSync(path.join(fixtureBuild, "renamed-main.js"), "utf8"), patched);
 });

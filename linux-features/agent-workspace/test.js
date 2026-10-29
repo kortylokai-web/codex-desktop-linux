@@ -217,7 +217,8 @@ function writeSyntheticExtractedApp(root) {
   const assetsDir = path.join(root, "webview", "assets");
   fs.mkdirSync(buildDir, { recursive: true });
   fs.mkdirSync(assetsDir, { recursive: true });
-  fs.writeFileSync(path.join(buildDir, "main.js"), syntheticMainBundle());
+  fs.writeFileSync(path.join(buildDir, "main.js"),
+    'const lifecycle={messageId:"desktop.quitConfirmation.quit",event:"before-quit",markAppQuitting(){}};\n' + syntheticMainBundle());
   fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "codex" }));
   fs.writeFileSync(path.join(assetsDir, "local-conversation-thread-test.js"), staleConversationMonitorBundle());
   fs.writeFileSync(path.join(assetsDir, "composer-test.js"), syntheticComposerBundle());

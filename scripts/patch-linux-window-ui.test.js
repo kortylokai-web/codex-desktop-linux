@@ -7,6 +7,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const {
+  findMainBundle,
+} = require("./patches/lib/assets.js");
 
 const {
   corePatchDescriptors,
@@ -18,6 +21,26 @@ const {
   enabledFeatureFailuresFromReport,
   reportHasPatchChanges,
 } = require("./lib/patch-report.js");
+
+const MAIN_LIFECYCLE = 'const lifecycle={messageId:"desktop.quitConfirmation.quit",event:"before-quit",markAppQuitting(){}};\n';
+
+test("discovers the main implementation by its lifecycle rather than its chunk filename", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "semantic-main-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const buildDir = path.join(root, ".vite", "build");
+  fs.mkdirSync(buildDir, { recursive: true });
+  fs.writeFileSync(path.join(buildDir, "main.js"), 'throw Error("decoy must not run");');
+  const actual = "early-bootstrap-916-changing-hash.js";
+  fs.writeFileSync(path.join(buildDir, actual), MAIN_LIFECYCLE);
+  fs.mkdirSync(path.join(buildDir, "directory.js"));
+  fs.symlinkSync(path.join(buildDir, actual), path.join(buildDir, "alias.js"));
+  assert.deepEqual(findMainBundle(root), { buildDir, mainBundle: actual });
+  fs.writeFileSync(path.join(buildDir, "another-chunk.js"), MAIN_LIFECYCLE);
+  assert.throws(() => findMainBundle(root), /Ambiguous main-process implementation/);
+  fs.unlinkSync(path.join(buildDir, actual));
+  fs.unlinkSync(path.join(buildDir, "another-chunk.js"));
+  assert.equal(findMainBundle(root), null);
+});
 
 test("best-effort feature drift stays non-fatal without hiding changed outputs", () => {
   const report = createPatchReport();
@@ -168,7 +191,7 @@ function patchFeatureFixture(t, moduleSource, manifest = {}) {
   const config = path.join(featuresRoot, "features.json");
   fs.mkdirSync(featureDir, { recursive: true });
   fs.mkdirSync(path.dirname(mainPath), { recursive: true });
-  fs.writeFileSync(mainPath, "const main=true;\n");
+  fs.writeFileSync(mainPath, MAIN_LIFECYCLE + "const main=true;\n");
   fs.writeFileSync(config, JSON.stringify({
     enabled: ["probe"], settings: { probe: { marker: "configured" } },
   }));
@@ -259,7 +282,7 @@ test("valid raw and constructor feature descriptors keep settings, attribution, 
     })));
     assert.deepEqual(enabledFeatureFailuresFromReport(report), []);
   }
-  assert.equal(fs.readFileSync(fixture.mainPath, "utf8"), "const main=true;\n// configured\n// constructor\n");
+  assert.equal(fs.readFileSync(fixture.mainPath, "utf8"), MAIN_LIFECYCLE + "const main=true;\n// configured\n// constructor\n");
 });
 
 test("empty descriptors, resource-only features, and disabled modules remain valid", (t) => {
@@ -275,6 +298,6 @@ test("empty descriptors, resource-only features, and disabled modules remain val
     const report = createPatchReport();
     patchExtractedApp(fixture.appDir, { ...fixture.options, report });
     assert.deepEqual(report.patches, []);
-    assert.equal(fs.readFileSync(fixture.mainPath, "utf8"), "const main=true;\n");
+    assert.equal(fs.readFileSync(fixture.mainPath, "utf8"), MAIN_LIFECYCLE + "const main=true;\n");
   }
 });

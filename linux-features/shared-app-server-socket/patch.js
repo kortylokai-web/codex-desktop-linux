@@ -8,7 +8,7 @@ const IDENT = "[A-Za-z_$][\\w$]*";
 function findTransportSymbols(source) {
   const classMatches = [...source.matchAll(
     new RegExp(
-      `var (${IDENT})=class\\{options;kind=\\\`websocket\\\`;logger=${IDENT}\\.${IDENT}\\(\\\`AppServerTransportSshWebsocket\\\`\\)`,
+      `class (${IDENT})\\{options;kind="websocket";logger=\\(0,${IDENT}\\.${IDENT}\\)\\("AppServerTransportSshWebsocket"\\)`,
       "g",
     ),
   )];
@@ -16,47 +16,47 @@ function findTransportSymbols(source) {
   if (classMatches.length !== 1 || selectionLogIndex < 0 ||
       classMatches[0].index >= selectionLogIndex) return null;
   const [classMatch] = classMatches;
-
-  const sshRegion = source.slice(classMatch.index, selectionLogIndex);
-  const connectMatches = [...sshRegion.matchAll(
+  const classStart = source.indexOf("{", classMatch.index);
+  const classEnd = findMatchingBrace(source, classStart);
+  if (classEnd < 0 || classEnd >= selectionLogIndex) return null;
+  const sshClass = source.slice(classStart, classEnd + 1);
+  const connectMatches = [...sshClass.matchAll(
     new RegExp(`async connectToRemoteAppServer\\(${IDENT},${IDENT}\\)\\{`, "g"),
   )];
   if (connectMatches.length !== 1) return null;
   const connectStart = connectMatches[0].index;
-  const connectEnd = findMatchingBrace(sshRegion, sshRegion.indexOf("{", connectStart));
+  const connectEnd = findMatchingBrace(sshClass, sshClass.indexOf("{", connectStart));
   if (connectEnd < 0) return null;
-  // Keep injected transports and unrelated methods out of uniqueness checks.
-  const sshClassSource = sshRegion.slice(connectStart, connectEnd + 1);
+  // Trace one returned connection through its distinct imported WebSocket,
+  // message codec, adapter, negotiated frame limit, and keepalive callback.
+  const sshClassSource = sshClass.slice(connectStart, connectEnd + 1);
+  const stringLiteral = /"(?:[^"\\]|\\.)*"/.source;
   const webSocketMatches = [...sshClassSource.matchAll(
-    new RegExp(`(${IDENT})=new (${IDENT})\\.(${IDENT})\\((${IDENT}),\\{perMessageDeflate:!1,[^}]{0,160}createConnection:`, "g"),
+    new RegExp(`(${IDENT})=new (${IDENT})\\.(${IDENT})\\((${stringLiteral}),\\{perMessageDeflate:!1,[^}]{0,160}createConnection:`, "g"),
   )];
   if (webSocketMatches.length !== 1) return null;
-  const [, socket, namespace, webSocketClass, webSocketUrl] = webSocketMatches[0];
-
-  // Follow the returned connection and its codec, rather than selecting the
-  // first WebSocket wrapper. Upstream constructs the codec before opening and
-  // logs compression between constructing the adapter and starting keepalive.
+  const [, socket, webSocketNamespace, webSocketClass, webSocketUrl] = webSocketMatches[0];
   const adapterMatches = [...sshClassSource.matchAll(
-    new RegExp(`let (${IDENT})=new ${escapeRegExp(namespace)}\\.(${IDENT})\\(${escapeRegExp(socket)},void 0,(${IDENT}),(${IDENT})\\);return `, "g"),
+    new RegExp(`let (${IDENT})=new (${IDENT})\\.(${IDENT})\\(${escapeRegExp(socket)},void 0,(${IDENT}),(${IDENT})\\);return `, "g"),
   )];
   if (adapterMatches.length !== 1) return null;
-  const [, adapter, adapterClass, frameLimit, codec] = adapterMatches[0];
+  const [, adapter, namespace, adapterClass, frameLimit, codec] = adapterMatches[0];
   const codecMatches = [...sshClassSource.matchAll(
-    new RegExp(`let ${escapeRegExp(codec)}=new ${escapeRegExp(namespace)}\\.(${IDENT})\\(${escapeRegExp(socket)},${IDENT}!=null\\);`, "g"),
+    new RegExp(`let ${escapeRegExp(codec)}=new ${escapeRegExp(namespace)}\\.(${IDENT})\\(${escapeRegExp(socket)},null!=${IDENT}\\);`, "g"),
   )];
   const keepAliveMatches = [...sshClassSource.matchAll(
-    new RegExp(`${escapeRegExp(namespace)}\\.(${IDENT})\\(${escapeRegExp(socket)},\\{onPongTimeout:\\(\\)=>\\{${escapeRegExp(adapter)}\\.terminationReason=\x60pong_timeout\x60,${escapeRegExp(socket)}\\.terminate\\(\\)\\}\\}\\),this\\.hasConnected=!0,${escapeRegExp(adapter)}(?=[})])`, "g"),
+    new RegExp(`\\(0,${escapeRegExp(namespace)}\\.(${IDENT})\\)\\(${escapeRegExp(socket)},\\{onPongTimeout:\\(\\)=>\\{${escapeRegExp(adapter)}\\.terminationReason="pong_timeout",${escapeRegExp(socket)}\\.terminate\\(\\)\\}\\}\\),this\\.hasConnected=!0,${escapeRegExp(adapter)}(?=[})])`, "g"),
   )];
   const frameLimitMatches = [...sshClassSource.matchAll(
-    new RegExp(`let ${escapeRegExp(frameLimit)}=(${IDENT});${escapeRegExp(socket)}\\.once\\(\x60upgrade\x60,(${IDENT})=>\\{let (${IDENT})=Number\\(\\2\\.headers\\[(${IDENT})\\]\\);Number\\.isSafeInteger\\(\\3\\)&&\\3>0&&\\(${escapeRegExp(frameLimit)}=\\3\\)\\}\\);`, "g"),
+    new RegExp(`let ${escapeRegExp(frameLimit)}=(0x[0-9a-fA-F]+|[0-9]+);${escapeRegExp(socket)}\\.once\\("upgrade",(${IDENT})=>\\{let (${IDENT})=Number\\(\\2\\.headers\\[(${stringLiteral})\\]\\);Number\\.isSafeInteger\\(\\3\\)&&\\3>0&&\\(${escapeRegExp(frameLimit)}=\\3\\)\\}\\);`, "g"),
   )];
   if (codecMatches.length !== 1 || keepAliveMatches.length !== 1 || frameLimitMatches.length !== 1 ||
       webSocketMatches[0].index >= frameLimitMatches[0].index ||
       frameLimitMatches[0].index >= codecMatches[0].index ||
       codecMatches[0].index >= adapterMatches[0].index ||
       adapterMatches[0].index >= keepAliveMatches[0].index) return null;
-
   return {
+    webSocketNamespace,
     namespace,
     webSocketClass,
     webSocketUrl,
@@ -150,15 +150,16 @@ function sharedTransportClassSource(symbols) {
     "async ensureAuthority(){if(this.disposed)throw Error(`shared app-server socket transport is disposed`);if(this.authorityReady)return this.authorityReady;if(this.authority&&this.authority.exitCode==null&&this.authority.signalCode==null){if(this.authorityError)throw this.authorityError;return}let e=this.startAuthority();this.authorityReady=e;try{return await e}finally{this.authorityReady===e&&(this.authorityReady=null)}}" +
     "async startAuthority(){let e=process.env.CODEX_CLI_PATH;if(!e)throw Error(`shared app-server socket requires CODEX_CLI_PATH`);this.authorityError=null;let t=await this.getConfigOverrides();if(this.disposed)throw Error(`shared app-server socket transport was disposed during startup`);if(!Array.isArray(t)||t.some(e=>typeof e!==`string`))throw Error(`shared app-server socket received invalid config overrides`);await this.acquireOwnership();if(this.disposed){this.releaseOwnedPaths(!0);throw Error(`shared app-server socket transport was disposed during startup`)}let n=require(`node:fs`),r;try{r=require(`node:child_process`).spawn(e,[...t.flatMap(e=>[`-c`,e]),`app-server`,`--listen`,`unix://${this.socketPath}`],{env:process.env,stdio:`ignore`}),this.authority=r}catch(e){this.releaseOwnedPaths();throw e}try{this.recordAuthorityIdentity(r),await new Promise((e,t)=>{let i=!1,a,o=()=>{clearTimeout(a),clearTimeout(u),r.off(`error`,s),r.off(`exit`,l),r.off(`close`,l)},c=(n,u)=>{if(i)return;i=!0,o(),n?t(n):e(u)},s=e=>{this.authorityError=e,c(e)},l=()=>c(Error(`shared app-server authority exited before socket creation`)),h=()=>{if(i)return;try{let s=this.readSocketPath(),e=s.identity;if(s.target){if(typeof process.getuid==`function`&&e.uid!==process.getuid())return c(Error(`shared app-server socket has unexpected owner`));this.socketIdentity={dev:e.dev,ino:e.ino};return c(null)}}catch(e){if(e?.code!==`ENOENT`)return c(e)}a=setTimeout(h,100),a.unref?.()},u=setTimeout(()=>c(Error(`shared app-server socket creation timed out`)),1e4);r.once(`error`,s),r.once(`exit`,l),r.once(`close`,l),h(),u.unref?.()}),this.publishAttachedCliRecord(r,e),r.on(`error`,e=>{this.authorityError=e;for(let t of this.proxyStreams)t.destroy(e)}),r.once(`exit`,()=>{this.authority===r&&(this.authority=null,this.releaseOwnedPaths(!0))})}catch(e){this.authority=null;(await this.stopAuthority(r))&&this.releaseOwnedPaths();throw e}}" +
     "createProxyStream(){let c=process.env.CODEX_CLI_PATH;if(!c)throw Error(`shared app-server socket requires CODEX_CLI_PATH`);let e=require(`node:child_process`).spawn(c,[`app-server`,`proxy`,`--sock`,this.socketPath],{env:process.env,stdio:[`pipe`,`pipe`,`pipe`]}),t=e.stdin,n=e.stdout,r=e.stderr;if(t==null||n==null||r==null)throw e.kill(),Error(`shared app-server proxy stdio was unavailable`);let i=``;r.on(`data`,e=>{i=`${i}${e.toString(`utf8`)}`.slice(-4000)});let a=new(require(`node:stream`).Duplex)({read(){n.resume()},write(e,n,r){t.write(e,n,r)},final(e){t.end(),e()},destroy(t,n){e.kill(),n(t)}});Object.assign(a,{setKeepAlive:()=>a,setNoDelay:()=>a,setTimeout:()=>a});let o=e=>a.destroy(e);t.on(`error`,o),n.on(`data`,e=>{a.push(e)||n.pause()}),n.on(`end`,()=>a.push(null)),e.on(`error`,o),e.on(`close`,(e,n)=>{t.removeListener(`error`,o),e===0?a.push(null):a.destroy(Error(`shared app-server proxy exited (${e??n??`unknown`}): ${i.trim()}`))}),this.proxyStreams.add(a),a.once(`close`,()=>this.proxyStreams.delete(a));return a}" +
-    `connect(){return (${connectSharedSocket.toString()}).call(this,{WebSocket:${symbols.namespace}.${symbols.webSocketClass},MessageCodec:${symbols.namespace}.${symbols.codecClass},ConnectionAdapter:${symbols.namespace}.${symbols.adapterClass},keepAlive:${symbols.namespace}.${symbols.keepAlive},url:${symbols.webSocketUrl},maximumFrameBytes:${symbols.maximumFrameBytes},maximumFrameHeader:${symbols.maximumFrameHeader}})}}`
+    `connect(){return (${connectSharedSocket.toString()}).call(this,{WebSocket:${symbols.webSocketNamespace}.${symbols.webSocketClass},MessageCodec:${symbols.namespace}.${symbols.codecClass},ConnectionAdapter:${symbols.namespace}.${symbols.adapterClass},keepAlive:${symbols.namespace}.${symbols.keepAlive},url:${symbols.webSocketUrl},maximumFrameBytes:${symbols.maximumFrameBytes},maximumFrameHeader:${symbols.maximumFrameHeader}})}}`
   );
 }
 
 function applySharedAppServerSocketPatch(source) {
   const markerCount = source.split("class CodexLinuxSharedAppServerSocketTransport").length - 1;
   const symbols = findTransportSymbols(source);
-  if (markerCount === 1 && symbols != null) return source;
-  if (markerCount !== 0) {
+  const dispatchCount = source.split("new CodexLinuxSharedAppServerSocketTransport(").length - 1;
+  if (markerCount > 1 || (markerCount === 0 && dispatchCount !== 0) ||
+      (markerCount === 1 && (symbols == null || dispatchCount !== 1))) {
     console.warn("WARN: Found incomplete or ambiguous shared app-server socket patch state");
     return source;
   }
@@ -168,25 +169,18 @@ function applySharedAppServerSocketPatch(source) {
   }
 
   const selectionLogIndex = source.indexOf("selected app-server transport");
-  const factoryStart = source.lastIndexOf("function ", selectionLogIndex);
-  const factoryEnd = source.indexOf("function ", selectionLogIndex + 1);
-  if (selectionLogIndex < 0 || factoryStart < 0 || factoryEnd < 0) {
-    console.warn("WARN: Could not find local transport factory for shared app-server socket patch");
+  // Rspack's factory contains nested function expressions. Find the unique
+  // enclosing named factory instead of treating the next "function" as its end.
+  const factories = [...source.matchAll(new RegExp(`function ${IDENT}\\(e\\)\\{let ${IDENT}=function\\(e\\)\\{`, "g"))]
+    .filter(match => match.index < selectionLogIndex)
+    .map(match => ({ start: match.index, end: findMatchingBrace(source, source.indexOf("{", match.index)) + 1 }))
+    .filter(({ end }) => end > selectionLogIndex);
+  if (factories.length !== 1) {
+    console.warn("WARN: Could not find unique local transport factory for shared app-server socket patch");
     return source;
   }
+  const [{ start: factoryStart, end: factoryEnd }] = factories;
   const factorySource = source.slice(factoryStart, factoryEnd);
-  const insertionPattern = new RegExp(
-    `(if\\(${IDENT}\\.${IDENT}\\(e\\.hostConfig\\)\\)return new ${IDENT}\\(\\{hostConfig:e\\.hostConfig,repoRoot:e\\.repoRoot,resourcesPath:e\\.resourcesPath,defaultOriginator:e\\.defaultOriginator\\}\\);)` +
-      `(?=let (${IDENT})=${IDENT}\\(e\\.hostConfig\\);if\\(\\2\\)\\{)`,
-    "g",
-  );
-  const insertionMatches = [...factorySource.matchAll(insertionPattern)];
-  if (insertionMatches.length !== 1) {
-    console.warn(
-      `WARN: Expected one local transport insertion point for shared app-server socket patch, found ${insertionMatches.length}`,
-    );
-    return source;
-  }
   const configOverridesPattern = new RegExp(
     `return new ${escapeRegExp(symbols.namespace)}\\.(${IDENT})\\(\\{hostConfig:e\\.hostConfig,repoRoot:e\\.repoRoot,resourcesPath:e\\.resourcesPath,defaultOriginator:e\\.defaultOriginator,getConfigOverrides:(async\\(\\)=>\\[[^\\]]{1,1000}\\])\\}\\)`,
     "g",
@@ -198,16 +192,44 @@ function applySharedAppServerSocketPatch(source) {
     );
     return source;
   }
-  const [insertionMatch] = insertionMatches;
   const getConfigOverrides = configOverridesMatches[0][2];
 
   const classSource = sharedTransportClassSource(symbols);
-
+  const dispatchSource = `if(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET&&e.hostConfig.kind===\`local\`&&e.hostConfig.id===\`local\`)return new CodexLinuxSharedAppServerSocketTransport(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,${getConfigOverrides});`;
+  let unpatchedFactory = factorySource;
+  if (markerCount === 1) {
+    // A class marker alone does not prove the feature is active or intact.
+    // Validate the complete generated class and the unique dispatch using the
+    // native callback, then reconstruct the factory to verify its placement.
+    if (source.slice(factoryStart - classSource.length, factoryStart) !== classSource ||
+        !factorySource.includes(dispatchSource)) {
+      console.warn("WARN: Found incomplete or ambiguous shared app-server socket patch state");
+      return source;
+    }
+    unpatchedFactory = factorySource.replace(dispatchSource, "");
+  }
+  const insertionPattern = new RegExp(
+    `(if\\(\\(0,${IDENT}\\.${IDENT}\\)\\(e\\.hostConfig\\)\\)return new ${IDENT}\\(\\{hostConfig:e\\.hostConfig,repoRoot:e\\.repoRoot,resourcesPath:e\\.resourcesPath,defaultOriginator:e\\.defaultOriginator\\}\\);)` +
+      `(?=let (${IDENT})=${IDENT}\\(e\\.hostConfig\\);if\\(\\2\\)\\{)`,
+    "g",
+  );
+  const insertionMatches = [...unpatchedFactory.matchAll(insertionPattern)];
+  if (insertionMatches.length !== 1) {
+    console.warn(
+      `WARN: Expected one local transport insertion point for shared app-server socket patch, found ${insertionMatches.length}`,
+    );
+    return source;
+  }
+  const [insertionMatch] = insertionMatches;
   const insertionIndex = insertionMatch.index + insertionMatch[0].length;
   const patchedFactory =
-    factorySource.slice(0, insertionIndex) +
-    `if(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET&&e.hostConfig.kind===\`local\`&&e.hostConfig.id===\`local\`)return new CodexLinuxSharedAppServerSocketTransport(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,${getConfigOverrides});` +
-    factorySource.slice(insertionIndex);
+    unpatchedFactory.slice(0, insertionIndex) + dispatchSource + unpatchedFactory.slice(insertionIndex);
+  if (markerCount === 1) {
+    if (patchedFactory !== factorySource) {
+      console.warn("WARN: Found incomplete or ambiguous shared app-server socket patch state");
+    }
+    return source;
+  }
   return source.slice(0, factoryStart) + classSource + patchedFactory + source.slice(factoryEnd);
 }
 

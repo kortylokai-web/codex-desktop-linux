@@ -15,14 +15,14 @@ function uniqueMatch(source, pattern, description) {
 function requireUsages(source, name, expected) {
   // Include bare references as well as calls so an added alias/export fails
   // closed. Property accesses such as constants.Aa are a different binding.
-  const uses = [...source.matchAll(new RegExp(`(?<![\\w$.])${escapeRegExp(name)}(?![\\w$])`, "g"))];
+  const uses = [...source.matchAll(new RegExp(`(?<![\\w$.#])${escapeRegExp(name)}(?![\\w$])`, "g"))];
   if (uses.length !== expected) {
     throw new Error(`Linux unified Computer Use contract drift: unexpected ${name} consumers`);
   }
 }
 
 function rootGuard(name) {
-  return `if(typeof ${name}!==\`string\`||${name}.length===0)throw Error(\`Linux Computer Use trusted plugin root is unavailable\`);`;
+  return `if(typeof ${name}!=="string"||${name}.length===0)throw Error("Linux Computer Use trusted plugin root is unavailable");`;
 }
 
 function lifecycleContract(source, builder, syncSource) {
@@ -52,6 +52,10 @@ function lifecycleContract(source, builder, syncSource) {
     `${ID}=${ID}\\?await ${ID}\\.getAuthenticatedPrincipal\\(\\)\\.catch\\(\\(\\)=>null\\):null,` +
     `${escapeRegExp(resume.groups.selection)}=\\k<cached>\\?\\.selection\\?\\?await ${ID}\\(`, "g"),
   "expected thread configuration to reuse the cached selection");
+  uniqueMatch(source.slice(resumeOwner.start, resumeOwner.end), new RegExp(
+    `${escapeRegExp(resume.groups.selection)}=\\{\\.\\.\\.${escapeRegExp(resume.groups.selection)},` +
+    `browserServicePluginVersion:${escapeRegExp(resume.groups.selection)}\\.browserServicePluginVersion\\?\\?${ID}\\?\\.selection\\.browserServicePluginVersion\\?\\?null\\}`, "g"),
+  "expected thread selection refresh to preserve trusted cached fields");
   if (sync.groups.context != null && sync.groups.selection !== cached.groups.selection) {
     throw new Error("Linux unified Computer Use contract drift: plugin root receiver is not the cached selection");
   }
@@ -79,11 +83,28 @@ function freshBuilderRoot(source) {
 }
 
 function applyUnifiedComputerUsePatch(source) {
+  // Rspack reuses minified bindings in isolated numeric modules. Validate
+  // consumers in the selector's module, excluding class-private properties.
+  if (source.includes("exports.modules={")) {
+    const modules = [...source.matchAll(/(?:^|[,{])\d+\([\w$,]+\)\{"use strict";/g)];
+    const selectors = [...source.matchAll(/[\w$]+=[\w$]+&&[\w$]+\.computerUse&&[\w$]+\.enabled&&\("win32"===[\w$]+\.platform\|\|"darwin"===[\w$]+\.platform&&null!=[\w$]+\.paths\.serviceAppPath/g)];
+    if (selectors.length !== 1) throw new Error("Linux unified Computer Use contract drift: expected one native surface selector");
+    const anchor = selectors[0].index;
+    const owner = modules.findLastIndex(match => match.index < anchor);
+    if (owner < 0) throw new Error("Linux unified Computer Use contract drift: missing runtime module");
+    const start = modules[owner].index;
+    const end = modules[owner + 1]?.index ?? source.length;
+    return source.slice(0, start) + patchUnifiedRuntimeModule(source.slice(start, end)) + source.slice(end);
+  }
+  return patchUnifiedRuntimeModule(source);
+}
+
+function patchUnifiedRuntimeModule(source) {
   // Match the current selector, including variable relationships. Both pristine
   // and patched forms must have exactly one owner; drift must abort the build.
-  const pattern = /(?<native>[\w$]+)=(?<ready>[\w$]+)&&(?<features>[\w$]+)\.computerUse&&(?<legacy>[\w$]+)\.enabled&&\((?<runtime>[\w$]+)\.platform===`win32`\|\|\k<runtime>\.platform===`darwin`&&\k<legacy>\.paths\.serviceAppPath!=null\)(?<linux>\|\|\k<ready>&&\k<runtime>\.platform===`linux`&&\k<features>\.computerUse&&\k<legacy>\.enabled)?,(?<mode>[\w$]+)=(?<modeLinux>\k<runtime>\.platform===`linux`\?\k<native>:)?(?<modeValue>\k<features>\.computerUse&&\(!\k<features>\.browserUseTinysky\|\|\k<runtime>\.platform!==`darwin`\|\|\k<legacy>\.enabled\))(?=,)/g;
+  const pattern = /(?<native>[\w$]+)=(?<ready>[\w$]+)&&(?<features>[\w$]+)\.computerUse&&(?<legacy>[\w$]+)\.enabled&&\("win32"===(?<runtime>[\w$]+)\.platform\|\|"darwin"===\k<runtime>\.platform&&null!=\k<legacy>\.paths\.serviceAppPath\)(?<linux>\|\|\k<ready>&&\k<runtime>\.platform==="linux"&&\k<features>\.computerUse&&\k<legacy>\.enabled)?,(?<mode>[\w$]+)=(?<modeLinux>\k<runtime>\.platform==="linux"\?\k<native>:)?(?<modeValue>\k<features>\.computerUse&&\(!\k<features>\.browserUseTinysky\|\|"darwin"!==\k<runtime>\.platform\|\|\k<legacy>\.enabled\))(?=,)/g;
   const matches = [...source.matchAll(pattern)];
-  const owners = [...source.matchAll(/[\w$]+=[\w$]+&&[\w$]+\.computerUse&&[\w$]+\.enabled&&\([\w$]+\.platform===`win32`\|\|[\w$]+\.platform===`darwin`&&[\w$]+\.paths\.serviceAppPath/g)];
+  const owners = [...source.matchAll(/[\w$]+=[\w$]+&&[\w$]+\.computerUse&&[\w$]+\.enabled&&\("win32"===[\w$]+\.platform\|\|"darwin"===[\w$]+\.platform&&null!=[\w$]+\.paths\.serviceAppPath/g)];
   if (matches.length !== 1 || owners.length !== 1 || !source.includes("cuaReplSurfaces:")) {
     throw new Error("Linux unified Computer Use contract drift: expected one native surface selector");
   }
@@ -110,30 +131,28 @@ function applyUnifiedComputerUsePatch(source) {
   const builderSource = source.slice(builderOwner.start, builderOwner.end);
   const surfaces = builder.groups.surfaces;
   const currentServicePattern = new RegExp(
-    `${surfaces}\\.includes\\(\`computer\`\\)&&\\((?<services>[\\w$]+)\\.sky=\`@oai/sky/service\`\\)`,
+    `${surfaces}\\.includes\\("computer"\\)&&\\((?<services>[\\w$]+)\\.sky="@oai/sky/service"\\)`,
     "g",
   );
   const patchedServicePattern = new RegExp(
-    `${surfaces}\\.includes\\(\`computer\`\\)&&\\((?<services>[\\w$]+)\\.sky=(?<path>[\\w$]+)\\.default\\.join\\((?<pluginRoot>[\\w$]+),\`scripts\`,\`native-service\\.mjs\`\\)\\)`,
+    `${surfaces}\\.includes\\("computer"\\)&&\\((?<services>[\\w$]+)\\.sky=require\\("node:path"\\)\\.join\\((?<pluginRoot>[\\w$]+),"scripts","native-service\\.mjs"\\)\\)`,
     "g",
   );
   const currentServices = [...builderSource.matchAll(currentServicePattern)];
   const patchedServices = [...builderSource.matchAll(patchedServicePattern)];
   const audioEnvironmentPattern =
-    `(?<audio>\\.\\.\\.${builder.groups.nodeRepl}\\?\\.env\\.SKY_AUDIO_ATTACHMENTS===\`1\`\\?\\{` +
-    `SKY_ENABLE_AUDIO:${surfaces}\\.includes\\(\`computer\`\\)\\?\`1\`:\`0\`,` +
-    `SKY_AUDIO_ATTACHMENTS:${surfaces}\\.includes\\(\`computer\`\\)\\?\`1\`:\`0\`,` +
-    "NODE_REPL_ENABLE_AUDIO:`0`\\}:\\{\\},)";
+    `(?<audio>\\.\\.\\.${builder.groups.nodeRepl}\\?\\.env\\.SKY_AUDIO_ATTACHMENTS==="1"\\?\\{` +
+    `SKY_ENABLE_AUDIO:${surfaces}\\.includes\\("computer"\\)\\?"1":"0",` +
+    `SKY_AUDIO_ATTACHMENTS:${surfaces}\\.includes\\("computer"\\)\\?"1":"0",` +
+    `NODE_REPL_ENABLE_AUDIO:"0"\\}:\\{\\},)`;
   const currentBannerPattern = new RegExp(
-    `CUA_REPL_NODE_REPL_PATH:${builder.groups.nodeRepl}\\?\\.command,` +
-      `CUA_REPL_ENABLED_SURFACES:${surfaces}\\.join\\(\`,\`\\),${audioEnvironmentPattern}` +
+    `CUA_REPL_ENABLED_SURFACES:${surfaces}\\.join\\(","\\),${audioEnvironmentPattern}` +
       `\\[(?<constants>[\\w$]+)\\.(?<constant>[\\w$]+)\\]:JSON\\.stringify\\((?<services>[\\w$]+)\\)`,
     "g",
   );
   const patchedBannerPattern = new RegExp(
-    `CUA_REPL_NODE_REPL_PATH:${builder.groups.nodeRepl}\\?\\.command,` +
-      `CUA_REPL_ENABLED_SURFACES:${surfaces}\\.join\\(\`,\`\\),CODEX_LINUX_CUA_HOST_SOCKET:process\\.env\\.CODEX_LINUX_CUA_HOST_SOCKET,` +
-      `NODE_REPL_JS_BANNER:\`await import\\("@oai/cua/tinyskyAlt"\\);await\\(await import\\(\\$\\{JSON\\.stringify\\((?<path>[\\w$]+)\\.default\\.join\\((?<pluginRoot>[\\w$]+),\`scripts\`,\`native-client\\.mjs\`\\)\\)\\}\\)\\)\\.installLinuxComputerUse\\(cua\\);\`,` +
+    `CUA_REPL_ENABLED_SURFACES:${surfaces}\\.join\\(","\\),CODEX_LINUX_CUA_HOST_SOCKET:process\\.env\\.CODEX_LINUX_CUA_HOST_SOCKET,` +
+      `NODE_REPL_JS_BANNER:\`await import\\("@oai/cua/tinyskyAlt"\\);await\\(await import\\(\\$\\{JSON\\.stringify\\(require\\("node:path"\\)\\.join\\((?<pluginRoot>[\\w$]+),"scripts","native-client\\.mjs"\\)\\)\\}\\)\\)\\.installLinuxComputerUse\\(cua\\);\`,` +
       audioEnvironmentPattern +
       `\\[(?<constants>[\\w$]+)\\.(?<constant>[\\w$]+)\\]:JSON\\.stringify\\((?<services>[\\w$]+)\\)`,
     "g",
@@ -148,7 +167,7 @@ function applyUnifiedComputerUsePatch(source) {
   const calls = [...source.matchAll(callPattern)];
   const callOwner = calls.length === 1 ? enclosingFunction(source, calls[0].index) : null;
   const callOwnerSource = callOwner == null ? "" : source.slice(callOwner.start, callOwner.end);
-  const pluginRoots = [...callOwnerSource.matchAll(/[\w$]+=(?<path>[\w$]+)\.default\.join\((?<pluginRoot>[\w$]+),`\.mcp\.json`\)/g)];
+  const pluginRoots = [...callOwnerSource.matchAll(/[\w$]+=(?<path>[\w$]+)\(\)\.join\((?<pluginRoot>[\w$]+),"\.mcp\.json"\)/g)];
   const lifecycle = lifecycleContract(source, builder.groups.builder, callOwnerSource);
   const serviceCurrent = currentServices.length === 1 && patchedServices.length === 0;
   const servicePatched = currentServices.length === 0 && patchedServices.length === 1;
@@ -170,7 +189,7 @@ function applyUnifiedComputerUsePatch(source) {
   const root = pluginRoots[0];
   const argument = lifecycle.argument;
   uniqueMatch(callOwnerSource, new RegExp(
-    `${escapeRegExp(root.groups.pluginRoot)}=${ID}\\.${ID}\\(\\{codexHome:${escapeRegExp(argument)}\\.codexHome,` +
+    `${escapeRegExp(root.groups.pluginRoot)}=\\(0,${ID}\\.${ID}\\)\\(\\{codexHome:${escapeRegExp(argument)}\\.codexHome,` +
     `localVersion:(?<plugin>${ID})\\.plugin\\.localVersion,marketplaceName:\\k<plugin>\\.marketplace\\.name,pluginName:\\k<plugin>\\.plugin\\.name\\}\\)`, "g"),
   "expected plugin root derived from verified installed plugin metadata");
   const publishRoot = `${argument}.${CONTEXT_KEY}.${ROOT_KEY}=${root.groups.pluginRoot};`;
@@ -178,8 +197,8 @@ function applyUnifiedComputerUsePatch(source) {
   if (banner.groups.services !== service.groups.services) {
     throw new Error("Linux unified Computer Use contract drift: changed native banner relationship");
   }
-  if (patched && (service.groups.path !== root.groups.path || service.groups.pluginRoot !== builder.groups.pluginRoot ||
-      banner.groups.path !== root.groups.path || banner.groups.pluginRoot !== builder.groups.pluginRoot ||
+  if (patched && (service.groups.pluginRoot !== builder.groups.pluginRoot ||
+      banner.groups.pluginRoot !== builder.groups.pluginRoot ||
       calls[0].groups.pluginRoot !== root.groups.pluginRoot)) {
     throw new Error("Linux unified Computer Use contract drift: changed native service path relationship");
   }
@@ -195,33 +214,28 @@ function applyUnifiedComputerUsePatch(source) {
   // an existing destructured parameter or local in the helper. Use a fresh
   // helper binding, including nested scopes that capture the injected value.
   const builderRoot = freshBuilderRoot(builderSource);
-  const pathAlias = root.groups.path;
-  const { backends, defer, nodeRepl, accessBootstrapPath } = builder.groups;
-  if ([backends, defer, surfaces, nodeRepl, accessBootstrapPath].includes(pathAlias)) {
-    throw new Error("Linux unified Computer Use contract drift: native config builder shadows the path module");
-  }
+  const { nodeRepl } = builder.groups;
   const edits = [
     {
       index: match.index,
       length: match[0].length,
       replacement:
-        `${native}=${ready}&&${features}.computerUse&&${legacy}.enabled&&(${runtime}.platform===\`win32\`||${runtime}.platform===\`darwin\`&&${legacy}.paths.serviceAppPath!=null)` +
-        `||${ready}&&${runtime}.platform===\`linux\`&&${features}.computerUse&&${legacy}.enabled,` +
-        `${mode}=${runtime}.platform===\`linux\`?${native}:${modeValue}`,
+        `${native}=${ready}&&${features}.computerUse&&${legacy}.enabled&&("win32"===${runtime}.platform||"darwin"===${runtime}.platform&&null!=${legacy}.paths.serviceAppPath)` +
+        `||${ready}&&${runtime}.platform==="linux"&&${features}.computerUse&&${legacy}.enabled,` +
+        `${mode}=${runtime}.platform==="linux"?${native}:${modeValue}`,
     },
     {
       index: builderOwner.start + service.index,
       length: service[0].length,
-      replacement: `${surfaces}.includes(\`computer\`)&&(${service.groups.services}.sky=${pathAlias}.default.join(${builderRoot},\`scripts\`,\`native-service.mjs\`))`,
+      replacement: `${surfaces}.includes("computer")&&(${service.groups.services}.sky=require("node:path").join(${builderRoot},"scripts","native-service.mjs"))`,
     },
     {
       index: builderOwner.start + banner.index,
       length: banner[0].length,
       replacement:
-        `CUA_REPL_NODE_REPL_PATH:${nodeRepl}?.command,` +
-        `CUA_REPL_ENABLED_SURFACES:${surfaces}.join(\`,\`),` +
+      `CUA_REPL_ENABLED_SURFACES:${surfaces}.join(","),` +
         `CODEX_LINUX_CUA_HOST_SOCKET:process.env.CODEX_LINUX_CUA_HOST_SOCKET,` +
-        `NODE_REPL_JS_BANNER:\`await import("@oai/cua/tinyskyAlt");await(await import(\${JSON.stringify(${pathAlias}.default.join(${builderRoot},\`scripts\`,\`native-client.mjs\`))})).installLinuxComputerUse(cua);\`,` +
+        `NODE_REPL_JS_BANNER:\`await import("@oai/cua/tinyskyAlt");await(await import(\${JSON.stringify(require("node:path").join(${builderRoot},"scripts","native-client.mjs"))})).installLinuxComputerUse(cua);\`,` +
         banner.groups.audio +
         `[${banner.groups.constants}.${banner.groups.constant}]:JSON.stringify(${banner.groups.services})`,
     },

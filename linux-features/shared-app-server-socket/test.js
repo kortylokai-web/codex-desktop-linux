@@ -19,6 +19,7 @@ const {
 const {
   applySharedAppServerSocketPatch,
   descriptors,
+  findTransportSymbols,
   sharedTransportClassSource,
 } = require("./patch.js");
 
@@ -685,6 +686,7 @@ function loadInjectedTransport({ spawnImpl, WebSocketImpl = null, fsImpl = fs, t
   };
   const source = sharedTransportClassSource({
     namespace: "n",
+    webSocketNamespace: "n",
     webSocketClass: "WS",
     webSocketUrl: "url",
     keepAlive: "keepAlive",
@@ -860,19 +862,30 @@ async function spawnOrphanAuthority(socketPath, alias = false) {
 
 function syntheticBundle() {
   return [
-    "var gC=class{options;kind=`websocket`;logger=i.i(`AppServerTransportSshWebsocket`);proxyStreams=new Set;hasConnected=!1;supportsReconnect(){return!0}",
-    "async connectToRemoteAppServer(e,t){return this.runWithSshStartupGate(async()=>{let t={current:null},r=new n.kn(qae,{perMessageDeflate:!1,createConnection:()=>",
-    "(t.current=this.createSshProxyStream(),t.current)});r.once(`close`,()=>{t.current?.destroy()});",
-    "let s=frameLimit;r.once(`upgrade`,e=>{let t=Number(e.headers[frameHeader]);Number.isSafeInteger(t)&&t>0&&(s=t)});let c=new n.Codec(r,headers!=null);",
-    "try{await opened(r)}catch(e){throw t.current?.destroy(),r.terminate(),e}",
-    "let i=new n.On(r,void 0,s,c);return this.logger.info(`app_server_connection.compression_negotiated`,{safe:{compression:c.compression}}),n.Dn(r,{onPongTimeout:()=>{i.terminationReason=`pong_timeout`,r.terminate()}}),this.hasConnected=!0,i})}};",
-    "function b5(e){let t=_C(e.hostConfig);if(t)return v5.info(`[ssh-websocket-v0] selected app-server transport`),new gC(t);",
-    "if(e.transportKind===`remote-control`)return new Remote(e);",
-    "if(n.no(e.hostConfig))return new hoe({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator});",
-    "let r=x5(e.hostConfig);if(r){e.desktopAuthAppServerClient;let t=vbe(e.hostConfig,r);return new n.Tn({hostConfig:e.hostConfig,websocketUrl:r,getWebsocketProtocols:void 0,...t==null?{}:{socksProxyUrl:t}})}",
-    "return new n.Cn({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator,getConfigOverrides:async()=>[...await Ope(e)]})}function afterFactory(){}",
+    'class gC{options;kind="websocket";logger=(0,i.i)("AppServerTransportSshWebsocket");proxyStreams=new Set;hasConnected=!1;supportsReconnect(){return!0}',
+    'async connectToRemoteAppServer(e,t){return this.runWithSshStartupGate(async()=>{let t={current:null},r=new ws.kn("ws://localhost/rpc",{perMessageDeflate:!1,headers:headers,createConnection:()=>',
+    '(t.current=this.createSshProxyStream(),t.current)});r.once("close",()=>{t.current?.destroy()});',
+    'let s=0x1000000;r.once("upgrade",e=>{let t=Number(e.headers["frame-limit"]);Number.isSafeInteger(t)&&t>0&&(s=t)});let c=new n.Codec(r,null!=headers);',
+    'try{await opened(r)}catch(e){throw t.current?.destroy(),r.terminate(),e}',
+    'let i=new n.On(r,void 0,s,c);return r.off("error",onError),this.logger.info("app_server_connection.compression_negotiated",{safe:{compression:c.compression}}),(0,n.Dn)(r,{onPongTimeout:()=>{i.terminationReason="pong_timeout",r.terminate()}}),this.hasConnected=!0,i})}};',
+    'function b5(e){let t=function(e){return _C(e)}(e.hostConfig);if(t)return v5.info("[ssh-websocket-v0] selected app-server transport"),new gC(t);',
+    'if("remote-control"===e.transportKind)return new Remote(e);',
+    'if((0,n.no)(e.hostConfig))return new hoe({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator});',
+    'let r=x5(e.hostConfig);if(r){e.desktopAuthAppServerClient;let t=function(e,t){return vbe(e,t)}(e.hostConfig,r);return new n.Tn({hostConfig:e.hostConfig,websocketUrl:r,getWebsocketProtocols:void 0,...null==t?{}:{socksProxyUrl:t}})}',
+    'return new n.Cn({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator,getConfigOverrides:async()=>[...(0,overrides.get)(e.globalState,e.hostConfig),...await e.secretAuthStorageConfigOverrides,...await Ope(e)]})}class AfterFactory{}',
   ].join("");
 }
+
+test("patch follows the current Rspack transport dependencies across namespaces and inline constants", () => {
+  assert.deepEqual(findTransportSymbols(syntheticBundle()), {
+    webSocketNamespace: "ws", webSocketClass: "kn", webSocketUrl: '\"ws://localhost/rpc\"',
+    namespace: "n", codecClass: "Codec", adapterClass: "On", keepAlive: "Dn",
+    maximumFrameBytes: "0x1000000", maximumFrameHeader: '\"frame-limit\"',
+  });
+  const patched = applySharedAppServerSocketPatch(syntheticBundle());
+  assert.notEqual(patched, syntheticBundle());
+  new vm.Script(patched);
+});
 
 test("shared-app-server-socket stays disabled until explicitly enabled", () => {
   withFeatureConfig([], (featuresRoot) => {
@@ -1750,7 +1763,7 @@ test("patch selects the bridge only for the local host and is idempotent", () =>
   assert.match(patched, /hostConfig\.kind===`local`/);
   assert.match(
     patched,
-    /CodexLinuxSharedAppServerSocketTransport\(process\.env\.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,async\(\)=>\[\.\.\.await Ope\(e\)\]\)/,
+    /CodexLinuxSharedAppServerSocketTransport\(process\.env\.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,async\(\)=>\[\.\.\.\(0,overrides\.get\)\(e\.globalState,e\.hostConfig\),\.\.\.await e\.secretAuthStorageConfigOverrides,\.\.\.await Ope\(e\)\]\)/,
   );
   assert.match(patched, /app-server`,\s*`proxy`,\s*`--sock`/);
   assert.match(patched, /flatMap\(e=>\[`-c`,e\]\).*app-server`,\s*`--listen`,\s*`unix:\/\//);
@@ -1762,13 +1775,13 @@ test("patch selects the bridge only for the local host and is idempotent", () =>
   assert.match(patched, /reclaimStaleLock/);
   assert.match(patched, /this\.sameIdentity\(this\.socketIdentity,e\)/);
   assert.match(patched, /requires CODEX_CLI_PATH/);
-  assert.match(patched, /new n\.kn\(qae,/);
-  assert.match(patched, /new n\.On\(/);
+  assert.match(patched, /WebSocket:ws\.kn/);
+  assert.match(patched, /ConnectionAdapter:n\.On/);
   assert.match(patched, /supportsReconnect\(\)\{return!0\}/);
 
   const negotiated = source.replace(
-    "return this.logger.info(`app_server_connection.compression_negotiated`,",
-    "return r.off(`error`,onError),this.logger.info(`app_server_connection.compression_negotiated`,",
+    'return r.off("error",onError),this.logger.info("app_server_connection.compression_negotiated",',
+    'return r.off("error",onError),r.off("error",anotherError),this.logger.info("app_server_connection.compression_negotiated",',
   );
   assert.notEqual(applySharedAppServerSocketPatch(negotiated), negotiated);
 });
@@ -1780,6 +1793,7 @@ async function connectPatchedBundle(source = syntheticBundle(), {
   handshakeHeaders = { "frame-limit": "32" },
   afterOpen = () => {},
   diagnostics = {},
+  transportSymbols = null,
 } = {}) {
   let socket;
   let pongTimeout;
@@ -1845,9 +1859,12 @@ async function connectPatchedBundle(source = syntheticBundle(), {
   }
   const patched = applySharedAppServerSocketPatch(source);
   assert.notEqual(patched, source);
-  const injected = patched.slice(patched.indexOf("class CodexLinuxSharedAppServerSocketTransport"), patched.indexOf("function b5(e)"));
+  const injected = transportSymbols == null
+    ? patched.slice(patched.indexOf("class CodexLinuxSharedAppServerSocketTransport"), patched.indexOf("function b5(e)"))
+    : sharedTransportClassSource({ ...findTransportSymbols(source), ...transportSymbols });
   const context = {
-    n: { kn: WebSocket, Codec, On: Adapter, Dn(ws, options) {
+    ws: { kn: WebSocket },
+    n: { Codec, On: Adapter, Dn(ws, options) {
       assert.equal(ws, socket, "keepalive must use the connection WebSocket");
       diagnostics.keepAliveStarted = true;
       pongTimeout = options.onPongTimeout;
@@ -1924,9 +1941,10 @@ for (const { label, symbol, value, headers, expectedLimit } of [
   { label: "frame header", symbol: "frameHeader", value: "frame-limit", headers: { "frame-limit": "32" }, expectedLimit: 32 },
 ]) {
   test(`generated transport preserves a ${label} binding named like its local socket`, async () => {
-    // Rename native locals first so the upstream fixture itself remains valid.
-    const source = syntheticBundle().replace(/\bt\b/g, "nativeTemp").replaceAll(symbol, "t");
-    const { connection } = await connectPatchedBundle(source, {
+    // Exercise the generated dependency boundary independently of upstream
+    // using literals today: future extracted names must not capture locals.
+    const { connection } = await connectPatchedBundle(syntheticBundle(), {
+      transportSymbols: { [symbol === "frameLimit" ? "maximumFrameBytes" : "maximumFrameHeader"]: "t" },
       bindings: { t: value },
       handshakeHeaders: headers,
     });
@@ -1939,13 +1957,13 @@ for (const { label, symbol, value, headers, expectedLimit } of [
 
 test("patch rejects ambiguous or disconnected codec and adapter lifecycles", () => {
   const source = syntheticBundle();
-  const codec = "let c=new n.Codec(r,headers!=null);";
+  const codec = 'let c=new n.Codec(r,null!=headers);';
   const cases = [
     source.replace(codec, `${codec}${codec}`),
-    source.replace(codec, "let c=new n.Codec(otherSocket,headers!=null);"),
+    source.replace(codec, "let c=new n.Codec(otherSocket,null!=headers);"),
     source.replace("new n.On(r,void 0,s,c)", "new n.On(r,void 0,s,otherCodec)"),
     source.replace("this.hasConnected=!0,i})", "this.hasConnected=!0,c})"),
-    source.replace("i.terminationReason=`pong_timeout`", "otherAdapter.terminationReason=`pong_timeout`"),
+    source.replace('i.terminationReason="pong_timeout"', 'otherAdapter.terminationReason="pong_timeout"'),
   ];
   const warnings = [];
   const originalWarn = console.warn;
@@ -1961,10 +1979,12 @@ test("patch rejects ambiguous or disconnected codec and adapter lifecycles", () 
   assert.equal(warnings.length, cases.length);
 });
 
-test("durable hosts retain their upstream transport even when kind is local", () => {
+test("durable hosts retain their upstream transport and the local bridge inherits all config overrides", async () => {
   const patched = applySharedAppServerSocketPatch(syntheticBundle());
-  const factory = patched.slice(patched.indexOf("function b5(e)"), patched.indexOf("function afterFactory"));
-  class Bridge {}
+  const factory = patched.slice(patched.indexOf("function b5(e)"), patched.indexOf("class AfterFactory"));
+  class Bridge {
+    constructor(socketPath, getConfigOverrides) { this.getConfigOverrides = getConfigOverrides; }
+  }
   class Cloud {}
   class Local {}
   const context = {
@@ -1974,11 +1994,49 @@ test("durable hosts retain their upstream transport even when kind is local", ()
     n: { no: () => false, Tn: Cloud, Cn: Local },
     x5: config => config.id === "durable" ? "wss://example.test" : null,
     vbe: () => null,
+    overrides: { get: () => ["base-config"] },
+    Ope: async () => ["desktop-config"],
   };
   vm.runInNewContext(`${factory};globalThis.create=b5`, context);
-  assert.ok(context.create({ hostConfig: { kind: "local", id: "local" } }) instanceof Bridge);
+  const bridge = context.create({
+    hostConfig: { kind: "local", id: "local" },
+    secretAuthStorageConfigOverrides: Promise.resolve(["secret-config"]),
+  });
+  assert.ok(bridge instanceof Bridge);
+  assert.deepEqual(Array.from(await bridge.getConfigOverrides()), ["base-config", "secret-config", "desktop-config"]);
   assert.ok(context.create({ hostConfig: { kind: "local", id: "durable" } }) instanceof Cloud);
   assert.ok(context.create({ hostConfig: { kind: "local", id: "other" } }) instanceof Local);
+});
+
+test("patch rejects incomplete or misplaced existing shared transport injections", async t => {
+  const patched = applySharedAppServerSocketPatch(syntheticBundle());
+  const guard = "if(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET&&e.hostConfig.kind===`local`&&e.hostConfig.id===`local`)return new CodexLinuxSharedAppServerSocketTransport(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,async()=>[...(0,overrides.get)(e.globalState,e.hostConfig),...await e.secretAuthStorageConfigOverrides,...await Ope(e)]);";
+  assert.ok(patched.includes(guard));
+  for (const [label, source] of [
+    ["missing factory dispatch", patched.replace(guard, "")],
+    ["incomplete generated class", patched.replace("supportsReconnect(){return!0}readSocketPath", "supportsReconnect(){return!1}readSocketPath")],
+    ["wrong configuration callback", patched.replace(guard, guard.replace("...await e.secretAuthStorageConfigOverrides,", ""))],
+    ["dispatch before upstream remote-control selection", patched.replace(guard, "").replace('if("remote-control"===e.transportKind)', `${guard}if("remote-control"===e.transportKind)`)],
+    ["duplicate factory dispatch", patched.replace(guard, `${guard}${guard}`)],
+    ["duplicate dispatch with a different callback", `${patched}${guard.replace("...await e.secretAuthStorageConfigOverrides,", "")}`],
+    ["dispatch without its class before upstream remote-control selection", patched
+      .replace(sharedTransportClassSource(findTransportSymbols(patched)), "")
+      .replace(guard, "")
+      .replace('if("remote-control"===e.transportKind)', `${guard}if("remote-control"===e.transportKind)`)],
+  ]) {
+    await t.test(label, () => {
+      assert.notEqual(source, patched, "each case must change the applied patch");
+      const warnings = [];
+      const originalWarn = console.warn;
+      console.warn = (...args) => warnings.push(args.join(" "));
+      try {
+        assert.equal(applySharedAppServerSocketPatch(source), source);
+      } finally {
+        console.warn = originalWarn;
+      }
+      assert.match(warnings.join("\n"), /incomplete or ambiguous shared app-server socket patch state/i);
+    });
+  }
 });
 
 test("patch rejects retired, duplicate, and mixed transport layouts", () => {
@@ -2016,8 +2074,8 @@ test("patch leaves unsupported bundle shapes unchanged with a warning", () => {
 
 test("patch rejects a current transport whose semantic SSH anchor is missing", () => {
   const source = syntheticBundle().replace(
-    "class{options;kind=`websocket`;logger=i.i(`AppServerTransportSshWebsocket`);",
-    "class{kind=`websocket`;",
+    'class gC{options;kind="websocket";logger=(0,i.i)("AppServerTransportSshWebsocket");',
+    'class gC{kind="websocket";',
   );
   const warnings = [];
   const originalWarn = console.warn;
@@ -2032,7 +2090,7 @@ test("patch rejects a current transport whose semantic SSH anchor is missing", (
 
 test("patch leaves a current transport with no config override callback byte-identical", () => {
   const source = syntheticBundle().replace(
-    ",getConfigOverrides:async()=>[...await Ope(e)]",
+    ",getConfigOverrides:async()=>[...(0,overrides.get)(e.globalState,e.hostConfig),...await e.secretAuthStorageConfigOverrides,...await Ope(e)]",
     "",
   );
   const warnings = [];
@@ -2048,7 +2106,7 @@ test("patch leaves a current transport with no config override callback byte-ide
 
 test("patch leaves an ambiguous config override callback byte-identical", () => {
   const callbackTransport =
-    "return new n.Cn({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator,getConfigOverrides:async()=>[...await Ope(e)]})";
+    "return new n.Cn({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator,getConfigOverrides:async()=>[...(0,overrides.get)(e.globalState,e.hostConfig),...await e.secretAuthStorageConfigOverrides,...await Ope(e)]})";
   const source = syntheticBundle().replace(callbackTransport, `${callbackTransport};${callbackTransport}`);
   const warnings = [];
   const originalWarn = console.warn;

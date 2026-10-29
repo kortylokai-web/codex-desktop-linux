@@ -20,10 +20,10 @@ const {
 
 const emptyConfig = path.join(__dirname, "..", "..", "linux-features", "features.example.json");
 const officialQuitBundle =
-  "function qrt({isWindows:e,quitState:r,windows:i}){" +
-  "let S=!1;l.app.on(`before-quit`,o=>{if(e||r.canQuitWithoutPrompt()){S=!0,i.markAppQuitting();return}" +
-  "if(l.dialog.showMessageBoxSync({message:`Quit?`,buttons:[{messageId:`desktop.quitConfirmation.quit`},`Cancel`]})!==0){o.preventDefault();return}" +
-  "r.markQuitApproved(),S=!0,i.markAppQuitting()})}function next(){}";
+  'const register=function({isWindows:e,quitState:r,windows:i}){' +
+  'let S=!1;l.app.on("before-quit",o=>{if(e||r.canQuitWithoutPrompt()){S=!0,i.markAppQuitting();return}' +
+  '0!==l.dialog.showMessageBoxSync({message:"Quit?",buttons:[{messageId:"desktop.quitConfirmation.quit"},"Cancel"]})' +
+  '?o.preventDefault():(r.markQuitApproved(),S=!0,i.markAppQuitting())})};';
 
 function linuxTarget(id, versionId, desktop) {
   return detectLinuxTargetContext({
@@ -87,7 +87,7 @@ test("runner context exposes enabled feature IDs", () => {
   }
 });
 
-test("the default core registry repairs Quit and shell startup without changing webview assets", () => {
+test("the default core registry repairs Quit without changing webview assets", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "runner-baseline-"));
   try {
     const mainDir = path.join(root, ".vite", "build");
@@ -98,8 +98,8 @@ test("the default core registry repairs Quit and shell startup without changing 
     const webview = path.join(webviewDir, "app-initial-A.js");
     fs.writeFileSync(main, officialQuitBundle);
     const shell = path.join(mainDir, "shell-env-fixture.js");
-    fs.writeFileSync(shell, "async function load(a,b){let start=Date.now();e.app.isPackaged||clean();" +
-      "let abort=new AbortController;log(`Failed to load shell env`,{resultSource:`load`})}");
+    const shellSource = "upstreamShell();";
+    fs.writeFileSync(shell, shellSource);
     fs.writeFileSync(webview, "official-webview\n");
     const report = createPatchReport();
     patchExtractedApp(root, {
@@ -109,7 +109,7 @@ test("the default core registry repairs Quit and shell startup without changing 
     });
     assert.match(fs.readFileSync(main, "utf8"), /function codexLinuxQuitDialogParent\(/);
     assert.equal(fs.readFileSync(webview, "utf8"), "official-webview\n");
-    assert.match(fs.readFileSync(shell, "utf8"), /await new Promise\(setImmediate\)/);
+    assert.equal(fs.readFileSync(shell, "utf8"), shellSource);
     assert.equal(report.patches.length, 1);
     assert.equal(report.patches[0].name, "quit-confirmation-focus");
     assert.equal(report.patches[0].status, "applied");
@@ -120,15 +120,14 @@ test("the default core registry repairs Quit and shell startup without changing 
   }
 });
 
-test("portable artifacts include the shell repair when built on Ubuntu GNOME", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runner-portable-shell-repair-"));
+test("portable artifacts include the Quit repair when built on Ubuntu GNOME", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runner-portable-quit-repair-"));
   try {
     const mainDir = path.join(root, ".vite", "build");
     fs.mkdirSync(mainDir, { recursive: true });
     const main = path.join(mainDir, "main.js");
     const shell = path.join(mainDir, "shell-env-fixture.js");
-    const shellSource = "async function load(a,b){let start=Date.now();e.app.isPackaged||clean();" +
-      "let abort=new AbortController;log(`Failed to load shell env`,{resultSource:`load`})}";
+    const shellSource = "upstreamShell();";
     fs.writeFileSync(main, officialQuitBundle);
     fs.writeFileSync(shell, shellSource);
     const report = createPatchReport();
@@ -140,7 +139,7 @@ test("portable artifacts include the shell repair when built on Ubuntu GNOME", (
     });
 
     assert.match(fs.readFileSync(main, "utf8"), /function codexLinuxQuitDialogParent\(/);
-    assert.match(fs.readFileSync(shell, "utf8"), /await new Promise\(setImmediate\)/);
+    assert.equal(fs.readFileSync(shell, "utf8"), shellSource);
     assert.deepEqual(
       report.patches.map(({ name, status }) => ({ name, status })),
       [{ name: "quit-confirmation-focus", status: "applied" }],

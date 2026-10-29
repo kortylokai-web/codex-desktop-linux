@@ -38,12 +38,12 @@ function metadataService(platform, { windows = [{ app_id: "org.editor", wm_class
       return backendFailure ? { status: 1, stdout: "" } : { status: 0, stdout: JSON.stringify({ windows }) };
     } },
   };
-  const factory = vm.runInNewContext(`${patch(fixture)};makeNativeApplications`, {
+  const factory = vm.runInNewContext(`${patch(fixture)};new TestHandler().nativeApplications`, {
     require: name => modules[name], Buffer,
     process: { platform, env: { HOME: "/home/test", XDG_DATA_HOME: "/xdg", XDG_DATA_DIRS: "/empty", CODEX_LINUX_COMPUTER_USE_BACKEND_SOURCE: "/backend" } },
     catalog: native, cachedApp: async () => null, mediumIcon: async () => "official-medium", smallIcon: async () => "official-small",
   });
-  return { service: factory(), native, calls };
+  return { service: factory, native, calls };
 }
 
 test("Linux native metadata uses direct arrays, nullable lookup, and both icon sizes", async () => {
@@ -100,7 +100,7 @@ test("native metadata rejects duplicate owners and partial or damaged contracts"
   const patched = patch(fixture);
   for (const changed of [
     fixture + fixture, patched + fixture, patched + patched,
-    fixture.replace("nativeApplications=makeNativeApplications()", "nativeApplications=other()"),
+    fixture.replace("nativeApplications=(function()", "nativeApplications=other("),
     fixture.replace("nativeApplications:this.fetchHandler.nativeApplications", "nativeApplications:this.other.nativeApplications"),
     fixture.replace("iconSmall:null,iconMedium:", "iconSmall:undefined,iconMedium:"),
     patched.replace("list:async(e={})", "list:async(e=changed)"),

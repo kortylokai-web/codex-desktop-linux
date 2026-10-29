@@ -51,36 +51,37 @@ function resumeHarness(source) {
     "g",
   ));
   const identity = only(resumeSource, new RegExp(`(${IDENT})\\(${principal[1]}\\)`, "g"));
-  const env = only(resumeSource, new RegExp(`\\[(${IDENT})\\]:${IDENT},\\[(${IDENT})\\]:(${IDENT})\\.default\\.env\\.CODEX_APP_TOOLS_PIPE_PATH\\?\\?\`\`,\\[(${IDENT})\\]:`, "g"));
-  const fallback = only(resumeSource, new RegExp(`\\?\\{\\.\\.\\.${IDENT},\\.\\.\\.(${IDENT})\\}`, "g"));
-  const cleanup = only(resumeSource, new RegExp(`\\)\\),(${IDENT})\\(${IDENT}\\[\`mcp_servers\\.node_repl\`\\],${call[4]}\\.cuaReplSurfaces\\)`, "g"));
-  const pathAlias = only(buildSource, new RegExp(`(${IDENT})\\.default\\.join\\(${IDENT},\`scripts\`,\`native-service\\.mjs\`\\)`, "g"));
-  const services = only(buildSource, new RegExp(`\\[(${IDENT})\\.(${IDENT})\\]:JSON\\.stringify\\(${IDENT}\\)`, "g"));
-  const backends = only(buildSource, new RegExp(`\\[(${IDENT})\\]:${builder[2]}\\.join\\(\`,\`\\)`, "g"));
-  const executable = only(buildSource, new RegExp(
-    `command:${IDENT}\\.env\\[(${IDENT})\\.(${IDENT})\\],args:\\[\\.\\.\\.${builder[3]}==null\\?\\[\\]:` +
-    `\\[\`--import\`,\\(0,${IDENT}\\.pathToFileURL\\)\\(${builder[3]}\\)\\.href\\],` +
-    `${IDENT}\\.default\\.join\\(${IDENT}\\.env\\[\\1\\.(${IDENT})\\]`,
-    "g",
-  ));
+  const env = only(resumeSource, new RegExp(
+    String.raw`Object\.assign\(${IDENT}\.env,\{\[(${IDENT})\.(${IDENT})\]:${IDENT},\[\1\.(${IDENT})\]:(${IDENT})\(\)\.env\[(${IDENT})\]\?\?"",\[\1\.(${IDENT})\]:`, "g"));
+  const fallback = only(resumeSource, new RegExp(String.raw`:\{\.\.\.${IDENT},\.\.\.(${IDENT})\}`, "g"));
+  const cleanup = only(resumeSource, new RegExp(String.raw`\)\),(${IDENT})\(${IDENT}\["mcp_servers\.node_repl"\],${call[4]}\.cuaReplSurfaces\)`, "g"));
+  const pathAlias = only(buildSource, new RegExp(String.raw`let ${IDENT}=(${IDENT})\(\)\.join\(${IDENT}\.env\[(${IDENT})\.(${IDENT})\],"@oai/cua-repl"\)`, "g"));
+  const services = only(buildSource, new RegExp(String.raw`\[(${IDENT})\.(${IDENT})\]:JSON\.stringify\(${IDENT}\)`, "g"));
+  const backends = only(buildSource, new RegExp(String.raw`\[(${IDENT})\.(${IDENT})\]:${builder[2]}\.join\(","\)`, "g"));
+  const executable = only(buildSource, new RegExp(String.raw`command:${IDENT}\.env\[(${IDENT})\.(${IDENT})\],args:`, "g"));
+  const urlAlias = only(buildSource, new RegExp(String.raw`\(0,(${IDENT})\.pathToFileURL\)\(${IDENT}\)\.href`, "g"));
 
   let cached;
-  const constants = { [services[2]]: "services", [executable[2]]: "node", [executable[3]]: "packageRoot", [call[3]]: "cua_repl" };
+  const constants = { [services[2]]: "services", [executable[2]]: "node", [pathAlias[3]]: "packageRoot", [call[3]]: "cua_repl" };
   assert.equal(services[1], executable[1]);
   assert.equal(services[1], call[2]);
   const globals = {
-    [pathAlias[1]]: { default: path },
+    [pathAlias[1]]: () => path,
     [services[1]]: constants,
-    [backends[1]]: "browserBackends",
+    [backends[1]]: { [backends[2]]: "browserBackends", [env[2]]: "identity", [env[3]]: "toolsPipe", [env[6]]: "browserIdentity" },
     [cache[2]]: async () => cached,
     [cache[4]]: () => ({ browserUseTinysky: true }),
     [select[1]]: () => { throw Error("Unexpected fallback instead of cached selection"); },
     [config[1]]: async () => ({ "mcp_servers.node_repl": { command: "/node", env: { node: "/node", packageRoot: "/bundled" } } }),
     [identity[1]]: () => "test-identity",
-    [env[1]]: "identity", [env[2]]: "toolsPipe", [env[4]]: "browserIdentity",
-    [env[3]]: { default: { env: { CODEX_APP_SERVER_USE_LOCAL_DAEMON: "1" } } },
+    [env[4]]: () => ({ env: { CODEX_APP_SERVER_USE_LOCAL_DAEMON: "1" } }),
+    [env[5]]: "CODEX_APP_TOOLS_PIPE_PATH",
     [fallback[1]]: { "mcp_servers.cua_repl": { enabled: false } },
     [cleanup[1]]: () => {},
+    // Exercise the signed helper's missing-instructions fallback without
+    // touching packaged instructions, Electron, app-server, or a profile.
+    [urlAlias[1]]: { pathToFileURL() { throw Object.assign(Error("fixture has no instruction files"), { code: "ENOENT" }); } },
+    require, Error,
     process: { env: { CODEX_LINUX_CUA_HOST_SOCKET: "/runtime/cua.sock" } },
   };
   // Function declarations need a shared lexical scope for the builder call.

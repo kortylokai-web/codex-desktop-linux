@@ -25,8 +25,45 @@ test("current signed native metadata factory patches without changing the truste
   const actual = fs.readFileSync(file, "utf8");
   const patch = descriptors.find(({ id }) => id === "native-applications").apply;
   const patched = patch(actual);
-  assert.notEqual(patched, actual);
+  assert.equal(patched !== actual, true, "Expected the pristine signed contract to change");
   assert.equal(patch(patched), patched);
   assert.doesNotThrow(() => new vm.Script(patched));
   assert.equal(fs.readFileSync(file, "utf8"), actual);
 });
+
+for (const id of ["unified-runtime", "avatar-cursor", "ui-feature", "plugin-gate"]) {
+  test(`current signed ${id} patches once and preserves syntax`, { skip: !process.env.CODEX_SIGNED_EXTRACTED_APP }, () => {
+    const main = findMainBundle(process.env.CODEX_SIGNED_EXTRACTED_APP);
+    const actual = fs.readFileSync(path.join(main.buildDir, main.mainBundle), "utf8");
+    const patch = descriptors.find(descriptor => descriptor.id === id).apply;
+    const patched = patch(actual);
+    assert.equal(patched !== actual, true, "Expected the pristine signed contract to change");
+    assert.equal(patch(patched), patched);
+    assert.doesNotThrow(() => new vm.Script(patched));
+  });
+}
+
+test("current signed main descriptors compose and remain idempotent", { skip: !process.env.CODEX_SIGNED_EXTRACTED_APP }, () => {
+  const main = findMainBundle(process.env.CODEX_SIGNED_EXTRACTED_APP);
+  const original = fs.readFileSync(path.join(main.buildDir, main.mainBundle), "utf8");
+  const patches = descriptors.filter(descriptor => descriptor.phase === "main-bundle").sort((a,b) => a.order-b.order);
+  const apply = source => patches.reduce((current, descriptor) => descriptor.apply(current), source);
+  const patched = apply(original);
+  assert.equal(patched !== original, true);
+  assert.equal(apply(patched), patched);
+  assert.doesNotThrow(() => new vm.Script(patched));
+});
+
+for (const descriptor of descriptors.filter(descriptor => descriptor.phase === "webview-asset")) {
+  test(`current signed ${descriptor.id} retains its unique contract`, { skip: !process.env.CODEX_SIGNED_EXTRACTED_APP }, () => {
+    const assets = path.join(process.env.CODEX_SIGNED_EXTRACTED_APP, "webview/assets");
+    const matches = fs.readdirSync(assets).filter(name => descriptor.pattern.test(name))
+      .map(name => fs.readFileSync(path.join(assets, name), "utf8"))
+      .filter(source => !descriptor.assetMatch || descriptor.assetMatch(source));
+    assert.equal(matches.length, 1);
+    const source = matches[0];
+    const patched = descriptor.apply(source);
+    assert.equal(patched !== source, true);
+    assert.equal(descriptor.apply(patched), patched);
+  });
+}

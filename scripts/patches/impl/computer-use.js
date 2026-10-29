@@ -3,11 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const {
-  findLastRegexMatch,
-  findMatchingBrace,
-  requireName,
-} = require("../lib/minified-js.js");
+const { findMatchingBrace } = require("../lib/minified-js.js");
 
 const COMPUTER_USE_UI_ENV_VAR = "CODEX_LINUX_ENABLE_COMPUTER_USE_UI";
 const COMPUTER_USE_UI_SETTINGS_KEY = "codex-linux-computer-use-ui-enabled";
@@ -23,64 +19,38 @@ function linuxComputerUseCursorBridgeRuntimeSource() {
   ].join("");
 }
 
-function findComputerUseCursorRegistrationFunction(source) {
-  const markerIndex = source.indexOf(COMPUTER_USE_CURSOR_HANDLER_MARKER);
-  if (markerIndex === -1) {
-    return null;
+function applyLinuxComputerUseAvatarCursorBridgePatch(source) {
+  const pattern = /function\((?<handler>[\w$]+),\{addon:[\w$]+,electronAppPath:[\w$]+,platform:(?<platform>[\w$]+)=process\.platform,resourcesPath:[\w$]+=process\.resourcesPath\}=\{\}\)\{(?<linux>if\("linux"===\k<platform>\)return codexLinuxRegisterComputerUseCursorHandler\(\k<handler>\);)?if\("darwin"===\k<platform>\)try\{/g;
+  const matches = [...source.matchAll(pattern)].filter(match => {
+    // Locate the body after the destructured options, not its default object.
+    const body = match.index + match[0].indexOf("){", match[0].indexOf("={}")) + 1;
+    const end = findMatchingBrace(source, body);
+    return source.slice(body, end).includes(COMPUTER_USE_CURSOR_HANDLER_MARKER);
+  });
+  const markerCount = source.split(COMPUTER_USE_CURSOR_HANDLER_MARKER).length - 1;
+  if (matches.length !== 1 || markerCount !== 1) {
+    console.warn("WARN: Could not identify unique current Computer Use cursor registration - skipping Linux avatar cursor bridge patch");
+    return source;
   }
-
-  const functionRegex = /function ([A-Za-z_$][\w$]*)\(([^)]*)\)\{/g;
-  let candidate = null;
-  let match;
-  while ((match = functionRegex.exec(source)) != null && match.index < markerIndex) {
-    const openIndex = match.index + match[0].length - 1;
-    const closeIndex = findMatchingBrace(source, openIndex);
-    if (closeIndex >= markerIndex) {
-      candidate = {
-        match,
-        start: match.index,
-        end: closeIndex + 1,
-        text: source.slice(match.index, closeIndex + 1),
-      };
-    }
+  const match = matches[0];
+  const runtime = linuxComputerUseCursorBridgeRuntimeSource();
+  const runtimeNames = [
+    LINUX_COMPUTER_USE_CURSOR_BRIDGE_MARKER,
+    "codexLinuxComputerUseCursorComponent",
+    "codexLinuxComputerUseCursorSocketPath",
+  ];
+  const runtimeCount = source.split(runtime).length - 1;
+  const remainder = source.replace(runtime, "").replace(match.groups.linux ?? "", "");
+  if (match.groups.linux != null && runtimeCount === 1 &&
+      !runtimeNames.some(name => remainder.includes(name))) return source;
+  if (match.groups.linux != null || runtimeNames.some(name => source.includes(name))) {
+    console.warn("WARN: Incomplete Linux avatar cursor bridge runtime or dispatch guard");
+    return source;
   }
-  return candidate;
-}
-
-function applyLinuxComputerUseAvatarCursorBridgePatch(currentSource) {
-  if (currentSource.includes(LINUX_COMPUTER_USE_CURSOR_BRIDGE_MARKER)) {
-    return currentSource;
-  }
-
-  const registration = findComputerUseCursorRegistrationFunction(currentSource);
-  const handlerVar = registration?.match[2].match(/^\s*([A-Za-z_$][\w$]*)\s*,/)?.[1] ?? null;
-  const platformVar = registration?.match[2].match(
-    /platform:([A-Za-z_$][\w$]*)=process\.platform/,
-  )?.[1] ?? null;
-  if (registration == null || handlerVar == null || platformVar == null) {
-    const reason = currentSource.includes(COMPUTER_USE_CURSOR_HANDLER_MARKER)
-      ? "Could not identify the Computer Use cursor registration function"
-      : "Could not find the Computer Use cursor handler marker";
-    console.warn(`WARN: ${reason} - skipping Linux avatar cursor bridge patch`);
-    return currentSource;
-  }
-
-  const darwinGuard = `if(${platformVar}!==\`darwin\`)return!1;`;
-  if (!registration.text.includes(darwinGuard)) {
-    console.warn(
-      "WARN: Computer Use cursor registration no longer has the expected Darwin guard - skipping Linux avatar cursor bridge patch",
-    );
-    return currentSource;
-  }
-
-  const patchedRegistration = registration.text.replace(
-    darwinGuard,
-    `if(${platformVar}===\`linux\`)return codexLinuxRegisterComputerUseCursorHandler(${handlerVar});${darwinGuard}`,
-  );
-  return currentSource.slice(0, registration.start) +
-    linuxComputerUseCursorBridgeRuntimeSource() +
-    patchedRegistration +
-    currentSource.slice(registration.end);
+  const guard = `if("darwin"===${match.groups.platform})try{`;
+  const replacement = match[0].replace(guard,
+    `if("linux"===${match.groups.platform})return codexLinuxRegisterComputerUseCursorHandler(${match.groups.handler});${guard}`);
+  return runtime + source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
 }
 
 // Computer Use has two postures: the bundled plugin gate is default-on Linux
@@ -137,54 +107,21 @@ function computerUseUiSettingsAppId(env) {
   return /^[A-Za-z0-9._-]+$/.test(appId) ? appId : "codex-desktop";
 }
 
-// Lookback/lookahead windows used when searching for the nearest minified
-// identifier or surrounding context around a regex anchor in the bundle.
-// Sized empirically to the typical distance between a feature's anchor and
-// the helper aliases it depends on.
-const TRAY_GUARD_LOOKAHEAD = 1200;
-const CLOSE_GATE_PREFIX_LOOKBACK = 8000;
-const HANDLER_PREFIX_LOOKBACK = 12000;
-const DIRECT_HANDLER_PROXIMITY = 1200;
-
-const linuxSettingsKeys = {
-  promptWindow: "codex-linux-prompt-window-enabled",
-  systemTray: "codex-linux-system-tray-enabled",
-  warmStart: "codex-linux-warm-start-enabled",
-};
-
-function applyLinuxComputerUseFeaturePatch(currentSource) {
-  const identifier = "[A-Za-z_$][\\w$]*";
-  const currentPattern = new RegExp(
-    `let (${identifier})=(${identifier})===\`win32\`&&(${identifier})\\.` +
-      `CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===\`1\`\\?\\{\\.\\.\\.(${identifier}),` +
-      `computerUse:!0\\}:\\4,`,
-    "g",
-  );
-  const patchedPattern = new RegExp(
-    `let (${identifier})=(${identifier})===\`linux\`\\?\\{\\.\\.\\.(${identifier}),computerUse:!0\\}:` +
-      `\\2===\`win32\`&&(${identifier})\\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===\`1\`\\?` +
-      `\\{\\.\\.\\.\\3,computerUse:!0\\}:\\3,`,
-    "g",
-  );
-  const current = [...currentSource.matchAll(currentPattern)];
-  const patched = [...currentSource.matchAll(patchedPattern)];
-  if (patched.length === 1 && current.length === 0) return currentSource;
-  if (current.length === 1 && patched.length === 0) {
-    const match = current[0];
-    const [, gateVar, platformVar, envVar, featuresVar] = match;
-    const replacement =
-      `let ${gateVar}=${platformVar}===\`linux\`?{...${featuresVar},computerUse:!0}:` +
-      `${platformVar}===\`win32\`&&${envVar}.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===\`1\`?` +
-      `{...${featuresVar},computerUse:!0}:${featuresVar},`;
-    return currentSource.slice(0, match.index) + replacement +
-      currentSource.slice(match.index + match[0].length);
+function applyLinuxComputerUseFeaturePatch(source) {
+  const pattern = /let (?<gate>[\w$]+)=(?<linux>"linux"===(?<linuxPlatform>[\w$]+)\?\{\.\.\.(?<linuxFeatures>[\w$]+),computerUse:!0\}:)?"win32"===(?<platform>[\w$]+)&&"1"===(?<env>[\w$]+)\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE\?\{\.\.\.(?<features>[\w$]+),computerUse:!0\}:\k<features>,/g;
+  const matches = [...source.matchAll(pattern)];
+  if (matches.length !== 1) {
+    console.warn("WARN: Could not find unique current Computer Use desktop feature gate - skipping Linux Computer Use feature patch");
+    return source;
   }
-
-  console.warn(
-    "WARN: Could not find Computer Use desktop feature gate — skipping Linux Computer Use feature patch",
-  );
-
-  return currentSource;
+  const match = matches[0];
+  const { gate, linux, linuxPlatform, linuxFeatures, platform, features } = match.groups;
+  if (linux != null) {
+    if (linuxPlatform !== platform || linuxFeatures !== features) console.warn("WARN: Inconsistent Linux Computer Use desktop feature gate");
+    return source;
+  }
+  const replacement = match[0].replace(`let ${gate}=`, `let ${gate}="linux"===${platform}?{...${features},computerUse:!0}:`);
+  return source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
 }
 
 function applyCurrentComputerUseHostPlatformContract(currentSource) {
