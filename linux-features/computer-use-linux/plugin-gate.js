@@ -9,9 +9,9 @@ function applyLinuxComputerUsePluginGatePatch(currentSource) {
   const identifier = String.raw`[A-Za-z_$][\w$]*`;
   const reference = String.raw`${identifier}(?:\.${identifier})+`;
   const descriptorPattern = new RegExp(
-    String.raw`\{\.\.\.(${reference}\.computerUse),autoInstallOptOutKey:(${reference})\(\1\.name\),` +
+    String.raw`\{\.\.\.(${reference}\.computerUse),autoInstallOptOutKey:\(0,(${reference})\)\(\1\.name\),` +
       String.raw`isAvailable:\(\{features:(${identifier}),platform:(${identifier})\}\)=>` +
-      String.raw`\(\4===\`darwin\`\|\|\4===\`win32\`(?<linux>\|\|\4===\`linux\`)?\)&&\3\.computerUse\}`,
+      String.raw`\("darwin"===\4\|\|"win32"===\4(?<linux>\|\|"linux"===\4)?\)&&\3\.computerUse\}`,
     "g",
   );
   const descriptors = [...currentSource.matchAll(descriptorPattern)];
@@ -24,9 +24,9 @@ function applyLinuxComputerUsePluginGatePatch(currentSource) {
   if (descriptor.groups.linux != null) return currentSource;
   const [match, metadata, optOut, features, platform] = descriptor;
   const replacement =
-    `{...${metadata},autoInstallOptOutKey:${optOut}(${metadata}.name),` +
+    `{...${metadata},autoInstallOptOutKey:(0,${optOut})(${metadata}.name),` +
     `isAvailable:({features:${features},platform:${platform}})=>` +
-    `(${platform}===\`darwin\`||${platform}===\`win32\`||${platform}===\`linux\`)&&` +
+    `("darwin"===${platform}||"win32"===${platform}||"linux"===${platform})&&` +
     `${features}.computerUse}`;
   return currentSource.slice(0, descriptor.index) + replacement +
     currentSource.slice(descriptor.index + match.length);

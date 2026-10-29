@@ -91,8 +91,8 @@ the official browser registry.
 
 `scripts/patches/runner.js` composes required core compatibility patches with
 descriptors from enabled features. The current registry repairs the unparented
-Quit-confirmation dialog and defers early shell-environment startup so browser
-initialization does not overwrite libuv's child-process signal handler. See the
+Quit-confirmation dialog. The signed upstream bootstrap now waits for Linux
+application readiness before starting its shell environment loader. See the
 [core patch registry](../scripts/patches/core/README.md) for reproduction evidence
 and retirement criteria. Patch reports remain the candidate-acceptance contract.
 Enabled feature descriptors default to enforced acceptance even when their

@@ -174,7 +174,8 @@ const executorContracts = {
 for (const [staging, stagingSource] of Object.entries(stagingContracts)) {
   for (const [executor, executorSource] of Object.entries(executorContracts)) {
     test(`runner isolates staging ${staging} and executor ${executor} contracts`, t => {
-      const source = `${stagingSource}\n${executorSource}`;
+      const source = 'const lifecycle={messageId:"desktop.quitConfirmation.quit",event:"before-quit",markAppQuitting(){}};\n' +
+        `${stagingSource}\n${executorSource}`;
       const { report, patched } = patchFixture(t, source);
       const contracts = [
         [STAGING_DESCRIPTOR_ID, STAGING_PATCH_MARKER, staging],

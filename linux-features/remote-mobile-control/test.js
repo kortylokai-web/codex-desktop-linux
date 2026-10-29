@@ -3667,7 +3667,8 @@ test("remote mobile control feature participates in ASAR patching and reports", 
         const assetsDir = path.join(tempApp, "webview", "assets");
         fs.mkdirSync(buildDir, { recursive: true });
         fs.mkdirSync(assetsDir, { recursive: true });
-        fs.writeFileSync(path.join(buildDir, "main.js"), source);
+        fs.writeFileSync(path.join(buildDir, "main.js"),
+          'const lifecycle={messageId:"desktop.quitConfirmation.quit",event:"before-quit",markAppQuitting(){}};\n' + source);
         fs.writeFileSync(
           path.join(buildDir, "workspace-root-drop-handler-test.js"),
           syntheticCurrentLocalAppServerLaunchBundle(),

@@ -11,13 +11,31 @@ function readDirectoryNames(dir) {
   return fs.readdirSync(dir);
 }
 
-function findMainBundle(extractedDir) {
+function readMainProcessModules(extractedDir) {
   const buildDir = path.join(extractedDir, ".vite", "build");
-  const mainBundle = readDirectoryNames(buildDir).find((name) =>
-    /^main(?:-[^.]+)?\.js$/.test(name),
-  );
+  if (!fs.existsSync(buildDir)) return [];
+  return fs.readdirSync(buildDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /\.(?:js|cjs|mjs)$/.test(entry.name))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map(({ name }) => {
+      const file = path.join(buildDir, name);
+      return { name, file, source: fs.readFileSync(file, "utf8") };
+    });
+}
 
-  return mainBundle == null ? null : { buildDir, mainBundle };
+function findMainBundle(extractedDir) {
+  // Upstream splits bootstrap and implementation across hashed chunks. The
+  // window/quit lifecycle owns the implementation consumed by main-bundle
+  // descriptors; neither package.json.main nor a chunk basename identifies it.
+  const matches = readMainProcessModules(extractedDir).filter(({ source }) =>
+    source.includes("desktop.quitConfirmation.quit") &&
+    source.includes("before-quit") && source.includes("markAppQuitting"));
+  if (matches.length > 1) {
+    throw new Error(`Ambiguous main-process implementation: ${matches.map(({ name }) => name).join(", ")}`);
+  }
+  return matches.length === 0 ? null : {
+    buildDir: path.dirname(matches[0].file), mainBundle: matches[0].name,
+  };
 }
 
 function findIconAsset(extractedDir) {
@@ -214,5 +232,6 @@ module.exports = {
   patchAssetFiles,
   patchUniqueAssetFile,
   readDirectoryNames,
+  readMainProcessModules,
   readWebviewAsset,
 };

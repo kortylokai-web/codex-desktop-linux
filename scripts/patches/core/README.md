@@ -13,46 +13,22 @@ resolves the blocker.
 
 ## `quit-confirmation-focus`
 
-The current signed stable package has two reproduced mandatory Linux blockers.
-One required descriptor validates both contracts before writing either module,
-so the clean-build policy has one auditable compound core mutation rather than
-independent partial repairs.
-
-### Shell environment startup
-
-On Fedora 44 with KDE, the current signed stable package starts its shell
-environment subprocess before Chromium's POSIX startup replaces SIGCHLD with a
-no-op handler. A startup syscall trace shows libuv registering its handler
-first, then Chromium overwriting it. Subsequent shell, Git, tar, and CLI
-preflight children exit but remain zombies, and new chats hang at “Starting
-your task”. This reproduces in the unmodified official package, including
-empty Codex state and a fresh browser profile. Restoring the captured libuv
-handler in the running test process immediately reaped the children; a new
-chat then started and replied.
-
-Defer the Linux shell environment loader by one `setImmediate` turn so its
-first spawn occurs after synchronous browser initialization. Preserve the
-upstream timeout, environment loading, policy validation, and error handling.
-The isolated repaired official build starts without accumulating zombies.
-Tests cover actual deferral, other-platform behavior, failure propagation,
-unique semantic matching, idempotence, and the signed official module.
-Because deb, RPM, pacman, AppImage, and Nix payloads can be built on a different
-distribution from the machine that runs them, the required descriptor is
-applied to every portable payload. The injected deferral is guarded by the
-runtime platform and is safe on other targets. Retire this patch when upstream
-orders these startup operations correctly.
-
-### Quit confirmation focus
-
-The current signed stable package opens its synchronous Quit confirmation
-without a parent window. On affected Linux desktops the modal can appear
-behind the application and leave Quit blocked with no focusable prompt. The
-required patch selects the focused visible window, then the visible primary
+The signed stable Linux package `26.1027.30824` still opens its synchronous Quit
+confirmation without a parent window. On affected Linux desktops the modal can
+appear behind the application and leave Quit blocked with no focusable prompt.
+The required patch selects the focused visible window, then the visible primary
 window, then another visible live window; it opens a parented asynchronous
 dialog and guards duplicate `before-quit` events until the user responds.
 
-The adjacent regression tests cover approval, cancellation, reentrancy,
-window selection, shell deferral, compound fail-closed semantic matching, and
-application to the signed campaign bundle. Retire the relevant repair when the
-signed stable bundle resolves its blocker; split the descriptor only if the
-clean-build policy explicitly approves multiple required core mutations.
+The adjacent regression tests cover approval, cancellation, reentrancy, window
+selection, dialog failure, fail-closed semantic matching, and idempotence.
+The descriptor applies to every portable payload, regardless of build host.
+Retire it when the signed stable bundle resolves the focus blocker.
+
+The former shell environment startup deferral is retired. In both signed
+`26.1027.30824` architectures, the early bootstrap awaits `app.whenReady()` on
+Linux before dynamically importing the network permissions initializer. That
+initializer then invokes the shell environment startup loader. This ordering
+avoids spawning the shell before Chromium initializes and replaces the SIGCHLD
+handler. The retirement is based on this verified signed startup source chain;
+live zombie-process and chat acceptance have not been revalidated.
