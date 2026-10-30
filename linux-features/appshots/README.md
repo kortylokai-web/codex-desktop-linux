@@ -16,7 +16,8 @@ This feature is disabled by default. Enable it before building:
 
 The feature is self-contained. It patches only the optional AppShots webview
 availability gate, Electron main-process capture service, and hotkey support.
-Linux hotkeys default to None and reuse the upstream AppShots settings surface.
+Linux hotkeys default to None. The current upstream app has no AppShots hotkey
+selector, and this feature does not add one. Previously saved bindings are retained.
 It does not add AppShots-specific code to `computer-use-linux`, core patch modules,
 or the default patch flow.
 
