@@ -15,11 +15,11 @@ This feature is disabled by default. Enable it before building:
 ```
 
 The feature is self-contained. It patches only the optional AppShots webview
-availability gate and the Electron main-process AppShots handlers. Upstream no
-longer ships the AppShots hotkey settings surface, so the feature does not
-patch or expose a Linux hotkey selector. It does not add AppShots-specific code
-to `computer-use-linux`, core patch modules, default patch flow, or packaged
-runtime hooks.
+availability gate, Electron main-process capture service, and hotkey support.
+Linux hotkeys default to None. The current upstream app has no AppShots hotkey
+selector, and this feature does not add one. Previously saved bindings are retained.
+It does not add AppShots-specific code to `computer-use-linux`, core patch modules,
+or the default patch flow.
 
 For window metadata and AT-SPI text, the feature shells out to the bundled
 Linux Computer Use backend's existing `windows` and `state` commands. For X11
@@ -68,8 +68,11 @@ Privacy and correctness constraints:
   ChatGPT is restored as soon as both inputs have been acquired, before the PNG
   and metadata are sent back to the composer. Capture transactions are
   serialized so two requests cannot race compositor focus or exchange targets.
-- Global hotkeys remain disabled on Linux because the current upstream package
-  no longer includes the AppShots hotkey settings surface.
+  Canceling a request stops its queued or running capture work. Running commands
+  must stop before temporary files are removed and ChatGPT focus is restored;
+  canceled requests never deliver an attachment.
+- Linux hotkeys default to None. Ordinary shortcuts use upstream registration;
+  bare-modifier shortcuts are available only on X11.
 - Previously saved `Alt + Alt` and `Shift + Shift` choices are backed by a feature-local
   `bare-modifier-monitor` helper staged into `resources/native/`. It requires
   the left and right modifier keycodes, so tapping only one physical modifier
